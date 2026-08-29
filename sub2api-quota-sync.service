@@ -1,0 +1,22 @@
+[Unit]
+Description=Sub2API 账号 7d 周期与订阅配额同步
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/sub2api-quota-sync.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/flock -n /run/sub2api-quota-sync.lock /usr/bin/python3 /opt/sub2api-quota-sync/quota_sync.py
+User=root
+Group=root
+
+# 仅需调用 Docker CLI；不允许额外提权或写入系统目录。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run -/opt/sub2api/deploy/data/plugins/installed/com.hzyhz.sub2api-quota-sync
+
+[Install]
+WantedBy=multi-user.target

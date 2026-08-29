@@ -1,0 +1,9 @@
+Sub2API 7d Quota Sync Plugin
+Copyright (c) 2026 future00001
+
+The files under native/pluginapi are derived from the public plugin API in
+Wei-Shaw/sub2api v0.1.183 and remain subject to the GNU Lesser General Public
+License version 3.
+
+Upstream project: https://github.com/Wei-Shaw/sub2api
+Upstream source commit: e8cb019fabf8b55199436229044cbf9aa7a82564

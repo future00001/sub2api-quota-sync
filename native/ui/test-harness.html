@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Quota Sync UI Harness</title>
+<style>html,body,iframe{width:100%;height:100%;margin:0;border:0}</style>
+<iframe id="plugin" src="index.html#bridge_token=test-token"></iframe>
+<script>
+const frame=document.getElementById('plugin');
+const config={enabled:false,dry_run:true,account_ids:[1],target_groups:['4'],reset_daily:false,reset_weekly:true,reset_monthly:false,min_cycle_shift_seconds:86400,rearm_remaining_seconds:432000,jitter_tolerance_seconds:21600,catalog:{accounts:[{id:1,label:'demo@example.com',name:'Demo',status:'active',schedulable:true}],groups:[{id:3,name:'测试订阅组 A'},{id:4,name:'测试订阅组 B'}]}};
+addEventListener('message',event=>{const d=event.data;if(event.source!==frame.contentWindow||!d||d.source!=='sub2api-plugin-ui'||!d.request_id)return;let response={source:'sub2api-plugin-host',bridge_token:'test-token',request_id:d.request_id,ok:true};if(d.type==='config.load')response.config=config;if(d.type==='config.save')response.config={...d.config,catalog:config.catalog};if(d.type==='config.test')response.result={success:true,message:'后台执行器已读取配置：业务开关关闭'};frame.contentWindow.postMessage(response,'*');});
+</script>

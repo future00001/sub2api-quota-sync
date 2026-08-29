@@ -1,0 +1,12 @@
+[Unit]
+Description=每分钟检查 Sub2API 账号 7d 周期
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=sub2api-quota-sync.service
+
+[Install]
+WantedBy=timers.target

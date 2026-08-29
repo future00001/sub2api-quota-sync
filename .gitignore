@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.log
+.env
+*.pem
+*.key
+native/.private/
+native/dist/
+dist/
+build/
+.idea/
+.vscode/
