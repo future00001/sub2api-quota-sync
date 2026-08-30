@@ -23,7 +23,7 @@ import (
 
 const (
 	pluginID      = "com.hzyhz.sub2api-quota-sync"
-	pluginVersion = "0.4.0"
+	pluginVersion = "0.4.1"
 	capabilityID  = "openai.oauth.outbound_transport.v1"
 	configName    = "quota-sync-config.json"
 	catalogName   = "quota-sync-catalog.json"

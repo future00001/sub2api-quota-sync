@@ -10,8 +10,8 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=SUB2API_ADMIN_API_KEY_FILE=%d/admin-api-key
 LoadCredential=admin-api-key:/etc/sub2api-quota-sync.key
 ExecStart=/usr/bin/flock -n /run/sub2api-quota-sync/lock /usr/bin/python3 /opt/sub2api-quota-sync/quota_sync.py
-User=1000
-Group=1000
+User=sub2api-quota-sync
+Group=sub2api-quota-sync
 RuntimeDirectory=sub2api-quota-sync
 RuntimeDirectoryMode=0700
 StateDirectory=sub2api-quota-sync

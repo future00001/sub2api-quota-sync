@@ -6,7 +6,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-for command in python3 flock systemctl install stat sed grep; do
+for command in python3 flock systemctl install stat sed grep getent cut groupadd useradd nologin; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "缺少命令: $command" >&2
     exit 1
@@ -34,7 +34,30 @@ case "$service_uid:$service_gid" in
     exit 1
     ;;
 esac
-sed -i "s/^User=.*/User=$service_uid/; s/^Group=.*/Group=$service_gid/" /etc/systemd/system/sub2api-quota-sync.service
+
+service_group=$(getent group "$service_gid" | cut -d: -f1 || true)
+if [ -z "$service_group" ]; then
+  if getent group sub2api-quota-sync >/dev/null 2>&1; then
+    echo "sub2api-quota-sync 组已存在但 GID 不是 $service_gid" >&2
+    exit 1
+  fi
+  groupadd --gid "$service_gid" sub2api-quota-sync
+  service_group=sub2api-quota-sync
+fi
+
+service_user=$(getent passwd "$service_uid" | cut -d: -f1 || true)
+if [ -z "$service_user" ]; then
+  if getent passwd sub2api-quota-sync >/dev/null 2>&1; then
+    echo "sub2api-quota-sync 用户已存在但 UID 不是 $service_uid" >&2
+    exit 1
+  fi
+  useradd --uid "$service_uid" --gid "$service_gid" --no-create-home \
+    --home-dir /nonexistent --shell "$(command -v nologin)" \
+    --comment "Sub2API quota sync sidecar" sub2api-quota-sync
+  service_user=sub2api-quota-sync
+fi
+
+sed -i "s/^User=.*/User=$service_user/; s/^Group=.*/Group=$service_group/" /etc/systemd/system/sub2api-quota-sync.service
 
 if [ ! -e /etc/sub2api-quota-sync.key ]; then
   install -m 0600 /dev/null /etc/sub2api-quota-sync.key
