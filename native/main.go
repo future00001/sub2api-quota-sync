@@ -23,7 +23,7 @@ import (
 
 const (
 	pluginID      = "com.hzyhz.sub2api-quota-sync"
-	pluginVersion = "0.3.1"
+	pluginVersion = "0.4.0"
 	capabilityID  = "openai.oauth.outbound_transport.v1"
 	configName    = "quota-sync-config.json"
 	catalogName   = "quota-sync-catalog.json"
@@ -149,8 +149,8 @@ func normalizeConfig(raw []byte) ([]byte, Config, error) {
 	if cfg.Enabled && len(cfg.TargetGroups) == 0 {
 		return nil, Config{}, errors.New("启用同步前至少填写一个目标分组名称或 ID")
 	}
-	if cfg.Enabled && !cfg.ResetDaily && !cfg.ResetWeekly && !cfg.ResetMonthly {
-		return nil, Config{}, errors.New("启用同步前至少选择一个重置窗口")
+	if cfg.Enabled && !cfg.ResetWeekly && !cfg.ResetMonthly {
+		return nil, Config{}, errors.New("Admin API 模式至少选择周或月窗口；日窗口可以与其组合")
 	}
 	if cfg.MinCycleShiftSeconds < 24*60*60 || cfg.MinCycleShiftSeconds > 8*24*60*60 {
 		return nil, Config{}, errors.New("新周期最小跳变必须在 1 到 8 天之间")

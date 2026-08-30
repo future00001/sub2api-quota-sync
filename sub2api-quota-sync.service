@@ -1,22 +1,47 @@
 [Unit]
 Description=Sub2API 账号 7d 周期与订阅配额同步
-After=docker.service
-Requires=docker.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/sub2api-quota-sync.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/flock -n /run/sub2api-quota-sync.lock /usr/bin/python3 /opt/sub2api-quota-sync/quota_sync.py
-User=root
-Group=root
+Environment=SUB2API_ADMIN_API_KEY_FILE=%d/admin-api-key
+LoadCredential=admin-api-key:/etc/sub2api-quota-sync.key
+ExecStart=/usr/bin/flock -n /run/sub2api-quota-sync/lock /usr/bin/python3 /opt/sub2api-quota-sync/quota_sync.py
+User=1000
+Group=1000
+RuntimeDirectory=sub2api-quota-sync
+RuntimeDirectoryMode=0700
+StateDirectory=sub2api-quota-sync
+StateDirectoryMode=0700
+TimeoutStartSec=3min
+UMask=0077
 
-# 仅需调用 Docker CLI；不允许额外提权或写入系统目录。
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
 ProtectSystem=strict
-ReadWritePaths=/run -/opt/sub2api/deploy/data/plugins/installed/com.hzyhz.sub2api-quota-sync
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/sub2api-quota-sync /var/lib/sub2api-quota-sync -/opt/sub2api/deploy/data/plugins/installed/com.hzyhz.sub2api-quota-sync
 
 [Install]
 WantedBy=multi-user.target

@@ -5,12 +5,11 @@
 ## 功能
 
 - 在 Sub2API 插件管理页多选账号和目标订阅分组。
-- 支持 daily、weekly、monthly 配额窗口。
+- 支持 weekly、monthly，以及与二者组合的 daily 配额窗口。
 - 首次运行只建立基线，不追溯重置。
-- PostgreSQL 事件唯一约束确保同一账号周期最多执行一次。
-- 事务内完成事件记录、状态推进和订阅配额重置。
-- 自动清理 Redis 订阅缓存并发布进程内缓存失效消息。
-- Redis 失效失败会保留 pending 状态并在后续任务中重试。
+- SQLite 事件和逐订阅状态确保同一账号周期最多创建一次任务。
+- 通过 Sub2API Admin API 重置配额，由 Sub2API 统一处理数据库事务和缓存失效。
+- API 响应丢失时根据额度窗口变化恢复，避免重复重置。
 - 支持演练模式和多个安全检测阈值。
 - 宿主插件被误启用时提供 HTTP 双向流式透传，避免 OAuth 请求中断。
 
@@ -19,7 +18,11 @@
 Sub2API `v0.1.183` 的插件协议只提供 `openai.oauth.outbound_transport.v1`，没有后台事件 API。因此本项目由两部分组成：
 
 1. 签名 `.s2plugin`：提供插件管理页中的配置 UI。
-2. systemd sidecar：每分钟读取账号快照并执行幂等同步。
+2. 非 root systemd sidecar：每分钟通过本机 Admin API 读取快照并执行幂等同步。
+
+sidecar 不访问 Docker socket、PostgreSQL 或 Redis。Admin API Key 由 systemd credentials 从
+`/etc/sub2api-quota-sync.key` 注入，不放入环境变量或插件配置。运行状态保存在
+`/var/lib/sub2api-quota-sync/state.sqlite3`。
 
 插件卡片的宿主“启用”不是业务开关。真正的同步开关是设置页内的“启用自动同步”。
 
@@ -55,9 +58,21 @@ cd sub2api-quota-sync
 sudo ./install.sh
 ```
 
-默认容器名为 `sub2api-postgres` 和 `sub2api-redis`。如部署不同，请编辑 `/etc/sub2api-quota-sync.env`。
+安装脚本会根据插件目录所有者设置 sidecar 的非 root UID/GID，默认是 `1000:1000`。
 
-### 4. 配置同步
+### 4. 配置 Admin API Key
+
+在 Sub2API 管理设置中生成 Admin API Key，然后以 root 身份写入专用凭据文件：
+
+```bash
+sudo install -m 0600 /dev/null /etc/sub2api-quota-sync.key
+sudoedit /etc/sub2api-quota-sync.key
+```
+
+密钥文件只能包含一行完整密钥。默认 API 地址是 `http://127.0.0.1:18080`；如 Sub2API 使用其他
+本机地址，请修改 `/etc/sub2api-quota-sync.env` 中的 `SUB2API_BASE_URL`。
+
+### 5. 配置同步
 
 打开“7d 订阅配额同步”设置：
 
@@ -65,6 +80,9 @@ sudo ./install.sh
 2. 保持“演练模式”，打开“启用自动同步”并保存。
 3. 等待一分钟后点击“测试已保存配置”。
 4. 确认账号、分组和有效订阅数量正确后关闭演练模式。
+
+从 `v0.3.x` 升级后，首次 API 版运行只建立新的本地基线，不会追溯重置。旧的 PostgreSQL 状态表
+不会删除，但执行器不再读取或写入它们。
 
 ## 默认检测阈值
 
@@ -81,6 +99,13 @@ python3 -m unittest -v test_quota_sync.py
 sudo systemctl start sub2api-quota-sync.service
 sudo journalctl -u sub2api-quota-sync.service -n 50 --no-pager
 sudo systemctl list-timers sub2api-quota-sync.timer
+```
+
+确认服务未持有 root 或 Docker 权限：
+
+```bash
+systemctl show sub2api-quota-sync.service -p User -p Group -p NoNewPrivileges
+systemctl cat sub2api-quota-sync.service
 ```
 
 ## 构建原生插件

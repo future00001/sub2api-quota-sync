@@ -12,7 +12,6 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-
 PLUGIN_ID = "com.hzyhz.sub2api-quota-sync"
 KEY_ID = "hzyhz-sub2api-quota-sync-v1"
 
@@ -53,8 +52,10 @@ def main() -> None:
         "schema_version": 1,
         "id": PLUGIN_ID,
         "name": "7d 订阅配额同步",
-        "version": "0.3.1",
-        "description": "配置账号 7d 周期与订阅配额同步；误启用宿主绑定时提供兼容 HTTP 流式透传。",
+        "version": "0.4.0",
+        "description": (
+            "配置账号 7d 周期与订阅配额同步；误启用宿主绑定时提供兼容 HTTP 流式透传。"
+        ),
         "author": "hzyhz",
         "requires": {
             "sub2api": ">=0.1.183-0",
@@ -64,37 +65,51 @@ def main() -> None:
             "transport_api": 1,
             "ui_bridge": 1,
         },
-        "capabilities": [{
-            "id": "openai.oauth.outbound_transport.v1",
-            "platform": "openai",
-            "account_type": "oauth",
-        }],
+        "capabilities": [
+            {
+                "id": "openai.oauth.outbound_transport.v1",
+                "platform": "openai",
+                "account_type": "oauth",
+            }
+        ],
         "runtimes": {"linux-amd64": {"path": "runtimes/linux-amd64/plugin"}},
         "ui": {"entrypoint": "ui/index.html"},
         "files": files,
     }
-    manifest_raw = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    manifest_raw = json.dumps(
+        manifest, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
     key = load_or_create_key(args.key)
     signature = {
         "algorithm": "ed25519",
         "key_id": KEY_ID,
         "signature": base64.b64encode(key.sign(manifest_raw)).decode("ascii"),
     }
-    public_raw = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    public_raw = key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(args.output, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", manifest_raw)
-        archive.writestr("signature.json", json.dumps(signature, separators=(",", ":")).encode("utf-8"))
+        archive.writestr(
+            "signature.json",
+            json.dumps(signature, separators=(",", ":")).encode("utf-8"),
+        )
         runtime = zipfile.ZipInfo("runtimes/linux-amd64/plugin")
         runtime.external_attr = 0o755 << 16
         archive.writestr(runtime, args.binary.read_bytes())
         archive.write(args.ui, "ui/index.html")
-    print(json.dumps({
-        "output": str(args.output),
-        "sha256": sha256(args.output),
-        "key_id": KEY_ID,
-        "public_key_base64": base64.b64encode(public_raw).decode("ascii"),
-    }, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "output": str(args.output),
+                "sha256": sha256(args.output),
+                "key_id": KEY_ID,
+                "public_key_base64": base64.b64encode(public_raw).decode("ascii"),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":

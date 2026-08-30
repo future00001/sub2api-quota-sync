@@ -82,6 +82,19 @@ func TestNormalizeRejectsEnabledWithoutGroup(t *testing.T) {
 	}
 }
 
+func TestNormalizeRejectsDailyOnly(t *testing.T) {
+	_, _, err := normalizeConfig([]byte(`{
+		"enabled":true,"account_ids":[1],"target_groups":["4"],
+		"reset_daily":true,"reset_weekly":false,"reset_monthly":false,
+		"min_cycle_shift_seconds":86400,
+		"rearm_remaining_seconds":432000,
+		"jitter_tolerance_seconds":21600
+	}`))
+	if err == nil {
+		t.Fatal("expected daily-only validation error")
+	}
+}
+
 func TestNormalizeRejectsUnknownField(t *testing.T) {
 	_, _, err := normalizeConfig([]byte(`{"unknown":true}`))
 	if err == nil {

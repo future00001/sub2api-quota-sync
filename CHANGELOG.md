@@ -1,5 +1,15 @@
 # 更新记录
 
+## v0.4.0 - 2026-08-30
+
+- 改用 Sub2API Admin API 读取账号、分组、订阅并重置配额。
+- 移除 Docker socket、PostgreSQL 直连、Redis 直连和手工缓存失效。
+- sidecar 改为非 root 用户并增加 systemd 权限、网络和超时限制。
+- 使用 systemd credentials 保存 Admin API Key，不再通过环境变量暴露密钥。
+- 使用本地 SQLite 保存周期、事件和逐订阅恢复状态。
+- API 响应不明确时通过额度窗口变化恢复，避免重复重置。
+- 修复 root 写入插件目录时固定临时文件名可能跟随符号链接的问题。
+
 ## v0.3.1 - 2026-08-29
 
 - 兼容范围调整为 `>=0.1.183-0`。
