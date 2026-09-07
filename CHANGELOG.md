@@ -1,5 +1,13 @@
 # 更新记录
 
+## v0.5.0 - 2026-09-07
+
+- 增加同步模式选择：`subscription`（订阅，默认，行为不变）和 `balance`（余额）。
+- 余额模式：检测到新 7d 周期时，读取全部有效用户，按用户属性 `SubscriptionLimit` 的值把余额重置（set）为该值；属性缺失或非正数的用户跳过并告警。
+- 余额模式不依赖分组，设置页在余额模式下会隐藏目标分组和重置窗口选项。
+- 新增用户额度划转服务 `sub2api-quota-sync-transfer.service`：用户按邮箱把自己的余额划转给其他用户，页面经 Sub2API `custom_menu_items` 以 iframe 嵌入用户侧栏。
+- 划转具备幂等键防重、限流、失败自动补偿和本地 SQLite 记录。
+
 ## v0.4.1 - 2026-08-30
 
 - 修复宿主机只有文件 UID/GID、没有对应 NSS 用户时 systemd 无法启动 sidecar 的问题。

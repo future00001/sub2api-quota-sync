@@ -23,7 +23,7 @@ import (
 
 const (
 	pluginID      = "com.hzyhz.sub2api-quota-sync"
-	pluginVersion = "0.4.1"
+	pluginVersion = "0.5.0"
 	capabilityID  = "openai.oauth.outbound_transport.v1"
 	configName    = "quota-sync-config.json"
 	catalogName   = "quota-sync-catalog.json"
@@ -32,6 +32,7 @@ const (
 type Config struct {
 	Enabled                bool           `json:"enabled"`
 	DryRun                 bool           `json:"dry_run"`
+	Mode                   string         `json:"mode"`
 	AccountIDs             []int64        `json:"account_ids"`
 	LegacyAccountID        int64          `json:"account_id,omitempty"`
 	TargetGroups           []string       `json:"target_groups"`
@@ -80,6 +81,7 @@ func defaultConfig() Config {
 	return Config{
 		Enabled:                false,
 		DryRun:                 true,
+		Mode:                   "subscription",
 		AccountIDs:             []int64{1},
 		TargetGroups:           []string{},
 		ResetWeekly:            true,
@@ -115,6 +117,13 @@ func normalizeConfig(raw []byte) ([]byte, Config, error) {
 		cfg.AccountIDs = []int64{cfg.LegacyAccountID}
 	}
 	cfg.LegacyAccountID = 0
+	switch cfg.Mode {
+	case "":
+		cfg.Mode = "subscription"
+	case "subscription", "balance":
+	default:
+		return nil, Config{}, errors.New("同步模式只能是 subscription（订阅）或 balance（余额）")
+	}
 	accountSeen := make(map[int64]struct{}, len(cfg.AccountIDs))
 	accounts := make([]int64, 0, len(cfg.AccountIDs))
 	for _, accountID := range cfg.AccountIDs {

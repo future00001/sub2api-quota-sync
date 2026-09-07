@@ -102,6 +102,55 @@ func TestNormalizeRejectsUnknownField(t *testing.T) {
 	}
 }
 
+func TestNormalizeModeAccepted(t *testing.T) {
+	for _, mode := range []string{"subscription", "balance"} {
+		_, cfg, err := normalizeConfig([]byte(`{"mode":"` + mode + `"}`))
+		if err != nil {
+			t.Fatalf("mode %q should be accepted: %v", mode, err)
+		}
+		if cfg.Mode != mode {
+			t.Fatalf("expected mode %q, got %q", mode, cfg.Mode)
+		}
+	}
+}
+
+func TestNormalizeEmptyModeDefaultsToSubscription(t *testing.T) {
+	raw, cfg, err := normalizeConfig([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != "subscription" {
+		t.Fatalf("expected empty mode to normalize to subscription, got %q", cfg.Mode)
+	}
+	if !bytes.Contains(raw, []byte(`"mode":"subscription"`)) {
+		t.Fatalf("expected mode persisted in normalized config: %s", raw)
+	}
+}
+
+func TestNormalizeRejectsInvalidMode(t *testing.T) {
+	_, _, err := normalizeConfig([]byte(`{"mode":"weekly"}`))
+	if err == nil {
+		t.Fatal("expected invalid-mode error")
+	}
+}
+
+func TestNormalizeModeRoundTrips(t *testing.T) {
+	raw, cfg, err := normalizeConfig([]byte(`{"mode":"balance"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != "balance" {
+		t.Fatalf("expected mode balance, got %q", cfg.Mode)
+	}
+	_, again, err := normalizeConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Mode != "balance" {
+		t.Fatalf("expected mode to survive re-normalization, got %q", again.Mode)
+	}
+}
+
 func TestLegacyAccountIDMigratesToStableConfig(t *testing.T) {
 	legacy, _, err := normalizeConfig([]byte(`{"account_id":1}`))
 	if err != nil {

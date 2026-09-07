@@ -17,9 +17,11 @@ root_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 install -d -m 0755 /opt/sub2api-quota-sync
 install -m 0755 "$root_dir/quota_sync.py" /opt/sub2api-quota-sync/quota_sync.py
+install -m 0755 "$root_dir/transfer_server.py" /opt/sub2api-quota-sync/transfer_server.py
 install -m 0644 "$root_dir/README.md" /opt/sub2api-quota-sync/README.md
 install -m 0644 "$root_dir/sub2api-quota-sync.service" /etc/systemd/system/sub2api-quota-sync.service
 install -m 0644 "$root_dir/sub2api-quota-sync.timer" /etc/systemd/system/sub2api-quota-sync.timer
+install -m 0644 "$root_dir/sub2api-quota-sync-transfer.service" /etc/systemd/system/sub2api-quota-sync-transfer.service
 
 plugin_root=/opt/sub2api/deploy/data/plugins/installed/com.hzyhz.sub2api-quota-sync
 service_uid=${SUB2API_UID:-1000}
@@ -57,7 +59,9 @@ if [ -z "$service_user" ]; then
   service_user=sub2api-quota-sync
 fi
 
-sed -i "s/^User=.*/User=$service_user/; s/^Group=.*/Group=$service_group/" /etc/systemd/system/sub2api-quota-sync.service
+sed -i "s/^User=.*/User=$service_user/; s/^Group=.*/Group=$service_group/" \
+  /etc/systemd/system/sub2api-quota-sync.service \
+  /etc/systemd/system/sub2api-quota-sync-transfer.service
 
 if [ ! -e /etc/sub2api-quota-sync.key ]; then
   install -m 0600 /dev/null /etc/sub2api-quota-sync.key
@@ -77,7 +81,13 @@ else
   grep -q '^STATE_PATH=' /etc/sub2api-quota-sync.env || printf '%s\n' 'STATE_PATH=/var/lib/sub2api-quota-sync/state.sqlite3' >> /etc/sub2api-quota-sync.env
 fi
 
+grep -q '^TRANSFER_LISTEN=' /etc/sub2api-quota-sync.env || printf '%s\n' 'TRANSFER_LISTEN=127.0.0.1:18083' >> /etc/sub2api-quota-sync.env
+grep -q '^TRANSFER_MIN_AMOUNT=' /etc/sub2api-quota-sync.env || printf '%s\n' 'TRANSFER_MIN_AMOUNT=1' >> /etc/sub2api-quota-sync.env
+grep -q '^TRANSFER_RATE_LIMIT=' /etc/sub2api-quota-sync.env || printf '%s\n' 'TRANSFER_RATE_LIMIT=5' >> /etc/sub2api-quota-sync.env
+grep -q '^TRANSFER_DB=' /etc/sub2api-quota-sync.env || printf '%s\n' 'TRANSFER_DB=/var/lib/sub2api-quota-sync/transfer.sqlite3' >> /etc/sub2api-quota-sync.env
+
 systemctl daemon-reload
 systemctl enable --now sub2api-quota-sync.timer
+systemctl enable --now sub2api-quota-sync-transfer.service
 
 echo "sidecar 已安装。请在 Sub2API 插件设置中配置账号和目标分组。"

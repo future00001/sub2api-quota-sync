@@ -52,7 +52,7 @@ def main() -> None:
         "schema_version": 1,
         "id": PLUGIN_ID,
         "name": "7d 订阅配额同步",
-        "version": "0.4.1",
+        "version": "0.5.0",
         "description": (
             "配置账号 7d 周期与订阅配额同步；误启用宿主绑定时提供兼容 HTTP 流式透传。"
         ),

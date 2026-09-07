@@ -1,0 +1,46 @@
+[Unit]
+Description=Sub2API 用户额度划转服务
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/sub2api-quota-sync.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SUB2API_ADMIN_API_KEY_FILE=%d/admin-api-key
+LoadCredential=admin-api-key:/etc/sub2api-quota-sync.key
+ExecStart=/usr/bin/python3 /opt/sub2api-quota-sync/transfer_server.py
+User=sub2api-quota-sync
+Group=sub2api-quota-sync
+StateDirectory=sub2api-quota-sync
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/sub2api-quota-sync
+
+[Install]
+WantedBy=multi-user.target

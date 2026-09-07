@@ -31,6 +31,15 @@ def parse_bool(value: str, name: str) -> bool:
     raise ValueError(f"{name} 必须是 true/false")
 
 
+def parse_mode(value: str, name: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"", "subscription"}:
+        return "subscription"
+    if normalized == "balance":
+        return "balance"
+    raise ValueError(f"{name} 必须是 subscription 或 balance")
+
+
 def parse_positive_int(value: str, name: str) -> int:
     try:
         result = int(value)
@@ -111,6 +120,8 @@ class Config:
     admin_api_key: str
     request_timeout_seconds: int
     state_path: Path
+    mode: str = "subscription"
+    balance_attribute_key: str = "SubscriptionLimit"
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
@@ -131,9 +142,10 @@ class Config:
         reset_monthly = parse_bool(
             source.get("RESET_MONTHLY", "false"), "RESET_MONTHLY"
         )
-        if enabled and not group_selectors:
+        mode = parse_mode(source.get("MODE", "subscription"), "MODE")
+        if enabled and mode != "balance" and not group_selectors:
             raise ValueError("启用时 GROUP_IDS 不能为空")
-        if enabled and not (reset_weekly or reset_monthly):
+        if enabled and mode != "balance" and not (reset_weekly or reset_monthly):
             raise ValueError(
                 "Admin API 模式至少要启用周或月窗口；仅日窗口无法安全恢复不明确请求"
             )
@@ -172,6 +184,11 @@ class Config:
             state_path=Path(
                 source.get("STATE_PATH", "/var/lib/sub2api-quota-sync/state.sqlite3")
             ),
+            mode=mode,
+            balance_attribute_key=source.get(
+                "BALANCE_ATTRIBUTE_KEY", "SubscriptionLimit"
+            ).strip()
+            or "SubscriptionLimit",
         )
 
     @classmethod
@@ -181,6 +198,7 @@ class Config:
         allowed = {
             "enabled",
             "dry_run",
+            "mode",
             "account_id",
             "account_ids",
             "catalog",
@@ -224,9 +242,13 @@ class Config:
         reset_daily = bool_field("reset_daily", base.reset_daily)
         reset_weekly = bool_field("reset_weekly", base.reset_weekly)
         reset_monthly = bool_field("reset_monthly", base.reset_monthly)
-        if enabled and not selectors:
+        raw_mode = value.get("mode", base.mode)
+        if not isinstance(raw_mode, str):
+            raise ValueError("mode 必须是字符串")
+        mode = parse_mode(raw_mode, "mode")
+        if enabled and mode != "balance" and not selectors:
             raise ValueError("启用时至少要填写一个目标分组名称或 ID")
-        if enabled and not (reset_weekly or reset_monthly):
+        if enabled and mode != "balance" and not (reset_weekly or reset_monthly):
             raise ValueError("Admin API 模式至少要选择周或月窗口；日窗口可以与其组合")
         raw_account_ids = value.get("account_ids")
         if raw_account_ids is None:
@@ -247,6 +269,7 @@ class Config:
             base,
             enabled=enabled,
             dry_run=bool_field("dry_run", base.dry_run),
+            mode=mode,
             account_ids=tuple(account_ids),
             group_ids=(),
             group_selectors=selectors,
@@ -515,6 +538,9 @@ class AdminApi:
     def accounts(self) -> list[dict[str, Any]]:
         return self.paginated("/admin/accounts?platform=openai")
 
+    def users(self) -> list[dict[str, Any]]:
+        return self.paginated("/admin/users")
+
     def groups(self) -> list[dict[str, Any]]:
         payload = self.request("GET", "/admin/groups/all?include_inactive=true")
         if not isinstance(payload, list):
@@ -558,6 +584,51 @@ class AdminApi:
         if not isinstance(payload, dict):
             raise RuntimeError(f"订阅 {subscription_id} 重置响应格式无效")
         return payload
+
+    def set_user_balance(
+        self, user_id: int, balance: float, notes: str
+    ) -> dict[str, Any]:
+        payload = self.request(
+            "POST",
+            f"/admin/users/{user_id}/balance",
+            {"balance": balance, "operation": "set", "notes": notes},
+        )
+        if payload is not None and not isinstance(payload, dict):
+            raise RuntimeError(f"用户 {user_id} 余额设置响应格式无效")
+        return payload if isinstance(payload, dict) else {}
+
+    def list_attribute_definitions(self) -> list[dict[str, Any]]:
+        payload = self.request("GET", "/admin/user-attributes")
+        if not isinstance(payload, list):
+            raise RuntimeError("用户属性定义响应格式无效")
+        return [item for item in payload if isinstance(item, dict)]
+
+    def batch_get_user_attributes(
+        self, user_ids: list[int]
+    ) -> dict[int, dict[int, str]]:
+        payload = self.request(
+            "POST", "/admin/user-attributes/batch", {"user_ids": user_ids}
+        )
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("attributes"), dict
+        ):
+            raise RuntimeError("用户属性批量查询响应格式无效")
+        result: dict[int, dict[int, str]] = {}
+        for raw_user_id, raw_attributes in payload["attributes"].items():
+            try:
+                user_id = int(raw_user_id)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(raw_attributes, dict):
+                continue
+            attributes: dict[int, str] = {}
+            for raw_attribute_id, raw_value in raw_attributes.items():
+                try:
+                    attributes[int(raw_attribute_id)] = str(raw_value)
+                except (TypeError, ValueError):
+                    continue
+            result[user_id] = attributes
+        return result
 
 
 def resolve_group_ids(api: AdminApi, selectors: tuple[str, ...]) -> tuple[int, ...]:
@@ -687,6 +758,80 @@ def eligible_targets(api: AdminApi, group_ids: tuple[int, ...]) -> list[dict[str
     return result
 
 
+def active_user_ids(api: AdminApi) -> list[int]:
+    """列出全部有效用户的 ID。
+
+    余额模式不依赖分组：凡是有效用户且填写了额度属性的都会被重置，
+    未填写属性的用户在后续解析阶段跳过。
+    """
+    user_ids: set[int] = set()
+    for item in api.users():
+        if item.get("status") != "active":
+            continue
+        try:
+            user_ids.add(int(item["id"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return sorted(user_ids)
+
+
+def resolve_balance_attribute(api: AdminApi, key: str) -> int:
+    """找到已启用且 key 匹配的用户属性定义，返回其 ID。"""
+    for item in api.list_attribute_definitions():
+        if str(item.get("key", "")) == key and bool(item.get("enabled")):
+            return int(item["id"])
+    raise ValueError(f"找不到已启用的用户属性定义: {key}")
+
+
+def parse_balance_value(raw: object) -> float | None:
+    """把属性字符串解析为正数余额；缺失/空/非数值/非正数返回 None。"""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def collect_balance_targets(
+    api: AdminApi, attribute_id: int, user_ids: list[int]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """解析各用户的额度属性，返回 (targets, warnings)。
+
+    属性缺失或无效的用户只产生 warning，绝不写入目标（不会清零其余额）。
+    """
+    user_ids = sorted({int(user_id) for user_id in user_ids})
+    warnings: list[str] = []
+    if not user_ids:
+        return [], warnings
+    attributes = api.batch_get_user_attributes(user_ids)
+    targets: list[dict[str, Any]] = []
+    for user_id in user_ids:
+        value = parse_balance_value(attributes.get(user_id, {}).get(attribute_id))
+        if value is None:
+            warnings.append(
+                f"用户 {user_id} 的额度属性缺失或不是正数，已跳过（余额保持不变）"
+            )
+            continue
+        targets.append({"user_id": user_id, "target_balance": value})
+    return targets, warnings
+
+
+def dry_run_balance_summary(
+    api: AdminApi, config: Config, user_ids: list[int]
+) -> tuple[int, list[str]]:
+    """dry_run 下的余额模式完整校验：解析属性并统计目标，不做任何写入。"""
+    attribute_id = resolve_balance_attribute(api, config.balance_attribute_key)
+    targets, warnings = collect_balance_targets(api, attribute_id, user_ids)
+    return len(targets), warnings
+
+
 class StateStore:
     def __init__(self, path: Path):
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -735,6 +880,16 @@ class StateStore:
                 last_error TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (event_id, subscription_id),
+                FOREIGN KEY (event_id) REFERENCES reset_events(id)
+            );
+            CREATE TABLE IF NOT EXISTS balance_targets (
+                event_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                target_balance REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (event_id, user_id),
                 FOREIGN KEY (event_id) REFERENCES reset_events(id)
             );
             """
@@ -863,6 +1018,64 @@ class StateStore:
             self.db.rollback()
             raise
 
+    def create_balance_event(
+        self,
+        config: Config,
+        account_id: int,
+        snapshot: Snapshot,
+        targets: list[dict[str, Any]],
+    ) -> int | None:
+        event_key = hashlib.sha256(
+            f"{account_id}\0{snapshot.reset_at.isoformat()}".encode()
+        ).hexdigest()
+        now = datetime.now(UTC).isoformat()
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            cursor = self.db.execute(
+                """
+                INSERT INTO reset_events(
+                    event_key, account_id, cycle_reset_at, detected_at, group_ids,
+                    reset_daily, reset_weekly, reset_monthly, affected_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_key,
+                    account_id,
+                    snapshot.reset_at.isoformat(),
+                    now,
+                    json.dumps(config.group_ids),
+                    int(config.reset_daily),
+                    int(config.reset_weekly),
+                    int(config.reset_monthly),
+                    len(targets),
+                ),
+            )
+            event_id = int(cursor.lastrowid)
+            for target in targets:
+                self.db.execute(
+                    """
+                    INSERT INTO balance_targets(
+                        event_id, user_id, target_balance, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        target["user_id"],
+                        target["target_balance"],
+                        now,
+                    ),
+                )
+            self._upsert_state(account_id, snapshot, now)
+            self.db.commit()
+            return event_id
+        except sqlite3.IntegrityError:
+            self.db.rollback()
+            self.write_observation(account_id, snapshot, update_cycle=True)
+            return None
+        except Exception:
+            self.db.rollback()
+            raise
+
     def _upsert_state(self, account_id: int, snapshot: Snapshot, now: str) -> None:
         self.db.execute(
             """
@@ -937,6 +1150,62 @@ class StateStore:
             )
         self.db.commit()
 
+    def has_balance_targets(self, event_id: int) -> bool:
+        row = self.db.execute(
+            "SELECT count(*) FROM balance_targets WHERE event_id=?", (event_id,)
+        ).fetchone()
+        return row[0] > 0
+
+    def pending_balance_targets(self, event_id: int) -> list[sqlite3.Row]:
+        return self.db.execute(
+            """SELECT * FROM balance_targets
+               WHERE event_id=? AND status NOT IN ('done','skipped')
+               ORDER BY user_id""",
+            (event_id,),
+        ).fetchall()
+
+    def mark_balance_target(
+        self, event_id: int, user_id: int, status: str, error: str = ""
+    ) -> None:
+        self.db.execute(
+            """UPDATE balance_targets SET status=?, last_error=?, updated_at=?
+               WHERE event_id=? AND user_id=?""",
+            (status, error[:500], datetime.now(UTC).isoformat(), event_id, user_id),
+        )
+        self.db.commit()
+
+    def retarget_balance(
+        self, event_id: int, user_id: int, target_balance: float
+    ) -> None:
+        self.db.execute(
+            """UPDATE balance_targets SET target_balance=?, updated_at=?
+               WHERE event_id=? AND user_id=?""",
+            (target_balance, datetime.now(UTC).isoformat(), event_id, user_id),
+        )
+        self.db.commit()
+
+    def finish_balance_event(self, event_id: int) -> None:
+        remaining = self.db.execute(
+            """SELECT count(*) FROM balance_targets
+               WHERE event_id=? AND status NOT IN ('done','skipped')""",
+            (event_id,),
+        ).fetchone()[0]
+        if remaining == 0:
+            self.db.execute(
+                """UPDATE reset_events
+                   SET status='complete', last_error='', completed_at=?
+                   WHERE id=?""",
+                (datetime.now(UTC).isoformat(), event_id),
+            )
+        else:
+            self.db.execute(
+                """UPDATE reset_events
+                   SET status='pending', last_error='部分用户等待重试'
+                   WHERE id=?""",
+                (event_id,),
+            )
+        self.db.commit()
+
 
 def reset_config_from_event(base: Config, event: sqlite3.Row) -> Config:
     return replace(
@@ -967,11 +1236,93 @@ def selected_windows_changed(
     return bool(selected) and all(selected)
 
 
+def process_balance_event(
+    api: AdminApi, store: StateStore, event: sqlite3.Row, config: Config
+) -> dict[str, int]:
+    """执行一个余额模式事件，返回本轮 set/skipped/failed 计数。
+
+    set 操作天然幂等，重跑安全；恢复时通过 batch 接口重读属性值，
+    与事件记录的目标值对比确认后再执行。
+    """
+    counts = {"set": 0, "skipped": 0, "failed": 0}
+    event_id = int(event["id"])
+    targets = store.pending_balance_targets(event_id)
+    if not targets:
+        store.finish_balance_event(event_id)
+        return counts
+    try:
+        attribute_id = resolve_balance_attribute(api, config.balance_attribute_key)
+        attributes = api.batch_get_user_attributes(
+            [int(target["user_id"]) for target in targets]
+        )
+    except Exception as exc:
+        for target in targets:
+            store.mark_balance_target(
+                event_id, int(target["user_id"]), "failed", str(exc)
+            )
+        counts["failed"] += len(targets)
+        store.finish_balance_event(event_id)
+        print(
+            f"balance_reset=pending event_id={event_id} error={exc}",
+            file=sys.stderr,
+        )
+        return counts
+    cycle_reset_at = str(event["cycle_reset_at"])
+    for target in targets:
+        user_id = int(target["user_id"])
+        target_balance = float(target["target_balance"])
+        fresh = parse_balance_value(attributes.get(user_id, {}).get(attribute_id))
+        if fresh is not None and fresh != target_balance:
+            store.retarget_balance(event_id, user_id, fresh)
+            target_balance = fresh
+        try:
+            store.mark_balance_target(event_id, user_id, "processing")
+            api.set_user_balance(
+                user_id,
+                target_balance,
+                notes=f"quota-sync balance reset cycle {cycle_reset_at}",
+            )
+            store.mark_balance_target(event_id, user_id, "done")
+            counts["set"] += 1
+            print(
+                f"balance_reset=done event_id={event_id} "
+                f"user_id={user_id} balance={target_balance}"
+            )
+        except ApiError as exc:
+            if exc.status == 404:
+                store.mark_balance_target(event_id, user_id, "skipped", "用户不存在")
+                counts["skipped"] += 1
+                continue
+            store.mark_balance_target(event_id, user_id, "failed", str(exc))
+            counts["failed"] += 1
+            print(
+                f"balance_reset=pending event_id={event_id} "
+                f"user_id={user_id} error={exc}",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            store.mark_balance_target(event_id, user_id, "failed", str(exc))
+            counts["failed"] += 1
+            print(
+                f"balance_reset=pending event_id={event_id} "
+                f"user_id={user_id} error={exc}",
+                file=sys.stderr,
+            )
+    store.finish_balance_event(event_id)
+    return counts
+
+
 def process_pending_events(
     api: AdminApi, store: StateStore, base_config: Config
-) -> None:
+) -> dict[str, int]:
+    counts = {"set": 0, "skipped": 0, "failed": 0}
     for event in store.pending_events():
         event_id = int(event["id"])
+        if store.has_balance_targets(event_id):
+            balance_counts = process_balance_event(api, store, event, base_config)
+            for key in counts:
+                counts[key] += balance_counts[key]
+            continue
         config = reset_config_from_event(base_config, event)
         for target in store.pending_targets(event_id):
             subscription_id = int(target["subscription_id"])
@@ -1023,6 +1374,7 @@ def process_pending_events(
                     file=sys.stderr,
                 )
         store.finish_event(event_id)
+    return counts
 
 
 def main() -> int:
@@ -1050,19 +1402,28 @@ def main() -> int:
             )
             print(f"status=disabled config_source={config_source}")
             return 0
-        config = replace(
-            config, group_ids=resolve_group_ids(api, config.group_selectors)
-        )
-        validation_targets = eligible_targets(api, config.group_ids)
+        warnings: list[str] = []
+        validation_targets: list[dict[str, Any]] = []
+        balance_user_ids: list[int] = []
+        if config.mode == "balance":
+            balance_user_ids = active_user_ids(api)
+        else:
+            config = replace(
+                config, group_ids=resolve_group_ids(api, config.group_selectors)
+            )
+            validation_targets = eligible_targets(api, config.group_ids)
         write_executor_status(
             config_source,
             ok=True,
             enabled=True,
             dry_run=config.dry_run,
+            mode=config.mode,
             selected_account_ids=list(config.account_ids),
             resolved_group_ids=list(config.group_ids),
             eligible_subscriptions=len(validation_targets),
-            message="真实分组校验通过",
+            balance_users=len(balance_user_ids),
+            warnings=warnings,
+            message="校验通过",
         )
         print(
             f"config_source={config_source} account_ids={config.account_ids} "
@@ -1070,8 +1431,10 @@ def main() -> int:
             f"resolved_group_ids={config.group_ids} dry_run={config.dry_run}"
         )
         store = StateStore(config.state_path)
+        run_counts = {"set": 0, "skipped": 0, "failed": 0}
         if not config.dry_run:
-            process_pending_events(api, store, config)
+            for key, value in process_pending_events(api, store, config).items():
+                run_counts[key] += value
         exit_code = 0
         for account_id in config.account_ids:
             snapshot = load_snapshot(api, account_id)
@@ -1096,9 +1459,67 @@ def main() -> int:
                 exit_code = 2
                 continue
             if config.dry_run:
+                if config.mode == "balance":
+                    try:
+                        target_count, dry_warnings = dry_run_balance_summary(
+                            api, config, balance_user_ids
+                        )
+                    except ValueError as exc:
+                        print(
+                            f"dry_run=true account_id={account_id} mode=balance "
+                            f"balance_attribute=missing error={exc}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    warnings.extend(dry_warnings)
+                    for warning in dry_warnings:
+                        print(f"warning={warning}", file=sys.stderr)
+                    print(
+                        f"dry_run=true account_id={account_id} mode=balance "
+                        f"balance_targets={target_count} "
+                        f"skipped_users={len(dry_warnings)} "
+                        f"group_ids={config.group_ids}"
+                    )
+                    continue
                 print(
                     f"dry_run=true account_id={account_id} "
                     f"eligible_subscriptions={len(validation_targets)} "
+                    f"group_ids={config.group_ids}"
+                )
+                continue
+            if config.mode == "balance":
+                try:
+                    attribute_id = resolve_balance_attribute(
+                        api, config.balance_attribute_key
+                    )
+                except ValueError as exc:
+                    write_executor_status(
+                        config_source,
+                        ok=False,
+                        enabled=True,
+                        mode=config.mode,
+                        warnings=[*warnings, str(exc)],
+                        message="余额属性定义未找到，本次不创建重置事件，下一分钟重试",
+                    )
+                    print(
+                        f"balance_attribute=missing account_id={account_id} "
+                        f"error={exc}",
+                        file=sys.stderr,
+                    )
+                    exit_code = 1
+                    continue
+                balance_targets, skipped_users = collect_balance_targets(
+                    api, attribute_id, balance_user_ids
+                )
+                warnings.extend(skipped_users)
+                for warning in skipped_users:
+                    print(f"warning={warning}", file=sys.stderr)
+                event_id = store.create_balance_event(
+                    config, account_id, snapshot, balance_targets
+                )
+                print(
+                    f"balance_reset=queued account_id={account_id} "
+                    f"event_id={event_id} affected_count={len(balance_targets)} "
                     f"group_ids={config.group_ids}"
                 )
                 continue
@@ -1110,7 +1531,24 @@ def main() -> int:
                 f"affected_count={len(validation_targets)} group_ids={config.group_ids}"
             )
         if not config.dry_run:
-            process_pending_events(api, store, config)
+            for key, value in process_pending_events(api, store, config).items():
+                run_counts[key] += value
+        if config.mode == "balance" and not config.dry_run:
+            write_executor_status(
+                config_source,
+                ok=not run_counts["failed"],
+                enabled=True,
+                dry_run=config.dry_run,
+                mode=config.mode,
+                selected_account_ids=list(config.account_ids),
+                resolved_group_ids=list(config.group_ids),
+                eligible_subscriptions=len(validation_targets),
+                warnings=warnings,
+                balance_set=run_counts["set"],
+                balance_skipped=run_counts["skipped"],
+                balance_failed=run_counts["failed"],
+                message="余额模式本轮执行完成",
+            )
         return exit_code
     except Exception as exc:
         write_executor_status(
