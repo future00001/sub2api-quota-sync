@@ -72,6 +72,48 @@ class DecisionTests(unittest.TestCase):
         )
         self.assertEqual("reset", decide(state, self.snapshot, config()).action)
 
+    def test_future_reset_shift_before_boundary_only_updates_observation(self):
+        state = State(
+            self.reset_at,
+            self.sample_at - timedelta(minutes=1),
+            98.0,
+        )
+        snapshot = Snapshot(
+            self.reset_at + timedelta(days=7),
+            self.reset_at - timedelta(days=2),
+            98.0,
+            604800,
+        )
+        self.assertEqual("observe", decide(state, snapshot, config()).action)
+
+    def test_reset_requires_crossing_previous_boundary(self):
+        state = State(
+            self.reset_at,
+            self.sample_at - timedelta(minutes=1),
+            98.0,
+        )
+        snapshot = Snapshot(
+            self.reset_at + timedelta(days=7),
+            self.reset_at + timedelta(minutes=1),
+            2.0,
+            604740,
+        )
+        self.assertEqual("reset", decide(state, snapshot, config()).action)
+
+    def test_short_new_window_does_not_trigger_after_old_boundary(self):
+        state = State(
+            self.reset_at,
+            self.sample_at - timedelta(minutes=1),
+            98.0,
+        )
+        snapshot = Snapshot(
+            self.reset_at + timedelta(hours=2),
+            self.reset_at + timedelta(minutes=1),
+            99.0,
+            7140,
+        )
+        self.assertEqual("not_rearmed", decide(state, snapshot, config()).action)
+
     def test_cycle_advance_must_be_rearmed(self):
         snapshot = Snapshot(
             self.sample_at + timedelta(days=2), self.sample_at, 2.0, 172800
@@ -232,6 +274,18 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(self.snapshot.reset_at, self.store.load_state(1).reset_at)
         count = self.store.db.execute("SELECT count(*) FROM reset_events").fetchone()[0]
         self.assertEqual(1, count)
+
+    def test_observation_never_moves_cycle_boundary_backwards(self):
+        earlier = self.snapshot
+        later = Snapshot(
+            earlier.reset_at + timedelta(hours=2),
+            earlier.sample_at + timedelta(minutes=1),
+            2.0,
+            604740,
+        )
+        self.store.write_observation(1, later, update_cycle=True)
+        self.store.write_observation(1, earlier, update_cycle=True)
+        self.assertEqual(later.reset_at, self.store.load_state(1).reset_at)
 
     def test_ambiguous_api_result_is_recovered_without_second_reset(self):
         event_id = self.store.create_event(

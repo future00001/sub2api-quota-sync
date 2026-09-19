@@ -416,17 +416,21 @@ def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
     if snapshot.sample_at <= state.sample_at:
         return Decision("stale", "账号用量快照没有更新")
     shift = snapshot.reset_at - state.reset_at
-    if abs(shift) <= config.jitter_tolerance:
-        return Decision("observe", "仍处于同一 7d 周期")
     if shift < -config.jitter_tolerance:
         return Decision("suspicious", "7d 重置时间异常后退，拒绝自动重置")
-    if shift < config.min_cycle_shift:
-        return Decision("suspicious", "7d 重置时间变化不足一个新周期，拒绝自动重置")
+
+    # reset_at 是账号预计的下一次边界，不是已经发生的重置事件。
+    # 未来时间提前变化时先更新候选边界，必须等快照越过该边界后才允许重置订阅。
+    if snapshot.sample_at < state.reset_at:
+        return Decision("observe", "账号尚未到达预计重置时间，等待实际进入新周期")
+
     remaining = snapshot.reset_at - snapshot.sample_at
     if remaining < config.rearm_remaining or snapshot.reset_after_seconds < int(
         config.rearm_remaining.total_seconds()
     ):
         return Decision("not_rearmed", "新快照尚未回到完整 7d 周期")
+    if shift < config.min_cycle_shift:
+        return Decision("suspicious", "7d 重置时间变化不足一个新周期，拒绝自动重置")
     return Decision("reset", "检测到 7d 倒计时进入新周期")
 
 
@@ -917,9 +921,12 @@ class StateStore:
         self, account_id: int, snapshot: Snapshot, *, update_cycle: bool
     ) -> None:
         existing = self.load_state(account_id)
-        cycle_reset_at = (
-            snapshot.reset_at if update_cycle or existing is None else existing.reset_at
-        )
+        if existing is None:
+            cycle_reset_at = snapshot.reset_at
+        elif update_cycle:
+            cycle_reset_at = max(existing.reset_at, snapshot.reset_at)
+        else:
+            cycle_reset_at = existing.reset_at
         now = datetime.now(UTC).isoformat()
         self.db.execute(
             """
@@ -1449,7 +1456,10 @@ def main() -> int:
             if decision.action == "baseline":
                 store.write_observation(account_id, snapshot, update_cycle=True)
                 continue
-            if decision.action in {"stale", "not_rearmed"}:
+            if decision.action == "stale":
+                continue
+            if decision.action == "not_rearmed":
+                store.write_observation(account_id, snapshot, update_cycle=True)
                 continue
             if decision.action == "observe":
                 store.write_observation(account_id, snapshot, update_cycle=True)
