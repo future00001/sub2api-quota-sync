@@ -100,6 +100,20 @@ class DecisionTests(unittest.TestCase):
         )
         self.assertEqual("reset", decide(state, snapshot, config()).action)
 
+    def test_reset_accepts_small_boundary_sampling_skew(self):
+        state = State(
+            self.reset_at,
+            self.sample_at - timedelta(minutes=1),
+            98.0,
+        )
+        snapshot = Snapshot(
+            self.reset_at + timedelta(days=7),
+            self.reset_at - timedelta(minutes=1),
+            0.0,
+            604740,
+        )
+        self.assertEqual("reset", decide(state, snapshot, config()).action)
+
     def test_short_new_window_does_not_trigger_after_old_boundary(self):
         state = State(
             self.reset_at,

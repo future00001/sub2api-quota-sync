@@ -410,6 +410,12 @@ class Decision:
     reason: str
 
 
+# Account usage snapshots and their derived reset_at values can differ by a few
+# seconds around the upstream boundary. Keep this tolerance small so it cannot
+# turn a real early reset into an accepted cycle transition.
+CYCLE_BOUNDARY_TOLERANCE = timedelta(minutes=5)
+
+
 def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
     if state is None:
         return Decision("baseline", "首次运行只建立基线")
@@ -421,7 +427,7 @@ def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
 
     # reset_at 是账号预计的下一次边界，不是已经发生的重置事件。
     # 未来时间提前变化时先更新候选边界，必须等快照越过该边界后才允许重置订阅。
-    if snapshot.sample_at < state.reset_at:
+    if snapshot.sample_at + CYCLE_BOUNDARY_TOLERANCE < state.reset_at:
         return Decision("observe", "账号尚未到达预计重置时间，等待实际进入新周期")
 
     remaining = snapshot.reset_at - snapshot.sample_at
