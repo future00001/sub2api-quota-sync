@@ -436,10 +436,20 @@ def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
         and snapshot.used_percent is not None
         and state.used_percent - snapshot.used_percent >= 1.0
     )
-    # 上游可能提前重置。边界明显推进、用量下降且恢复长周期，三项共同确认。
-    # 6 小时参数只防止边界异常后退，不限制真实重置的向前变化。
-    if rearmed and usage_reset and shift > CYCLE_BOUNDARY_TOLERANCE:
-        return Decision("reset", "账号用量下降且重置边界推进，确认新周期")
+    # 仅百分比下降不能证明重置：上游会修正百分比和预计时间。
+    # 新周期起点必须落在两次采样之间（允许 5 分钟时钟偏差），用量回到低位，
+    # 且边界推进超过配置的抖动容差。防止同周期的分钟级变化再次发放额度。
+    cycle_started_at = snapshot.reset_at - timedelta(days=7)
+    fresh_cycle = (
+        state.sample_at - CYCLE_BOUNDARY_TOLERANCE <= cycle_started_at
+        <= snapshot.sample_at + CYCLE_BOUNDARY_TOLERANCE
+    )
+    if (
+        rearmed and usage_reset and fresh_cycle
+        and snapshot.used_percent <= 5.0
+        and shift > max(config.jitter_tolerance, CYCLE_BOUNDARY_TOLERANCE)
+    ):
+        return Decision("reset", "新周期起点落在采样区间、用量回到低位且边界显著推进")
     if snapshot.sample_at + CYCLE_BOUNDARY_TOLERANCE < state.reset_at:
         return Decision("observe", "账号尚未到达预计重置时间，等待实际进入新周期")
     if not rearmed:

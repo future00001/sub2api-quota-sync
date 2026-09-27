@@ -148,9 +148,30 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual("suspicious", decide(state, self.snapshot, config()).action)
 
     def test_early_reset_with_usage_drop_and_seven_hour_shift(self):
-        state = State(self.reset_at, self.sample_at - timedelta(minutes=1), 60.0)
-        snap = Snapshot(self.reset_at + timedelta(hours=7), self.sample_at, 0.0, 579600)
+        sample = self.reset_at - timedelta(days=7) + timedelta(hours=7)
+        state = State(self.reset_at, sample - timedelta(minutes=1), 60.0)
+        snap = Snapshot(sample + timedelta(days=7), sample, 0.0, 604800)
         self.assertEqual("reset", decide(state, snap, config()).action)
+
+    def test_incident_20260927_five_minute_jitter_never_resets(self):
+        sample = datetime(2026, 9, 27, 4, 51, 47, tzinfo=UTC)
+        state = State(datetime(2026, 10, 3, 17, 1, 3, tzinfo=UTC), sample - timedelta(seconds=43), 40)
+        reset = datetime(2026, 10, 3, 17, 6, 40, tzinfo=UTC)
+        for used in (39, 5, 0):
+            snap = Snapshot(reset, sample, used, int((reset-sample).total_seconds()))
+            self.assertEqual("observe", decide(state, snap, config()).action)
+
+    def test_large_time_shift_with_old_derived_start_is_not_a_reset(self):
+        sample = self.sample_at
+        state = State(self.reset_at, sample - timedelta(minutes=1), 60)
+        snap = Snapshot(self.reset_at + timedelta(hours=7), sample, 0, 579600)
+        self.assertEqual("observe", decide(state, snap, config()).action)
+
+    def test_fresh_time_shift_without_low_usage_is_not_a_reset(self):
+        sample = self.reset_at - timedelta(days=7) + timedelta(hours=7)
+        state = State(self.reset_at, sample - timedelta(minutes=1), 60)
+        snap = Snapshot(sample + timedelta(days=7), sample, 59, 604800)
+        self.assertEqual("observe", decide(state, snap, config()).action)
 
     def test_forward_estimate_without_usage_drop_does_not_reset(self):
         state = State(self.reset_at, self.sample_at - timedelta(minutes=1), 60.0)
