@@ -136,7 +136,10 @@ sudoedit /etc/sub2api-quota-sync.key
 - 新周期最小跳变：24 小时。
 - 新周期最小剩余时间：120 小时。
 - 时间抖动容差：6 小时。
-- 账号预计重置时间提前变化时只更新候选边界；快照越过该边界且重新回到至少 120 小时后，才触发订阅同步。
+- 观察快照不覆盖已确认的周期边界，避免提前吃掉真实重置事件。
+- 快照越过已确认边界且恢复至少 120 小时，按最小跳变阈值确认正常重置。
+- 提前重置需要同时满足：用量下降至少 1 个百分点、边界推进超过 5 分钟、剩余时间恢复至少 120 小时且不超过 7 天加 5 分钟。
+- 秒级/分钟级倒计时变化不会单独刷新额度；6 小时容差只用于异常后退检测。
 
 这些字段只用于确认账号确实进入新周期，不会限制订阅刷新频率。
 
@@ -172,3 +175,18 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/plugin .
 ## 许可证
 
 本项目采用 [LGPL-3.0](LICENSE)。`native/pluginapi` 来源于 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api)，详见 [NOTICE](NOTICE)。
+
+## 精确周期对齐（2026-09-27）
+
+订阅同步需要宿主 `/admin/subscriptions/:id/reset-quota` 支持 `cycle_reset_at`。
+部署前先应用 `patches/sub2api-cycle-reset.patch` 并构建宿主，再更新执行器。
+补丁基于本机 Sub2API 定制源码；应用前检查版本及上下文，不能只升级执行器。
+
+确认新周期后，执行器把账号下次重置时间传给宿主。宿主在事务和行锁内清空选中的额度，
+周窗口起点设置为账号下次重置时间减 7 天，因此周倒计时准确对齐；月窗口同样从账号本次
+周期起点重新计算 30 天，日窗口仍保持每天零点刷新。
+相同周期重试不会再次清空已产生的用量，未激活订阅也可以首次同步。
+插件的同步事件和逐订阅状态仍用于失败恢复，不能通过删除状态库来强制同步。
+
+验证：`python3 -m unittest -v test_quota_sync.py test_transfer_server.py`。
+宿主补丁验证：`go test ./internal/service ./internal/handler/admin -run 'Test(CycleSync|BulkSubscriptionAction|Weekly)' -count=1`。

@@ -425,19 +425,29 @@ def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
     if shift < -config.jitter_tolerance:
         return Decision("suspicious", "7d 重置时间异常后退，拒绝自动重置")
 
-    # reset_at 是账号预计的下一次边界，不是已经发生的重置事件。
-    # 未来时间提前变化时先更新候选边界，必须等快照越过该边界后才允许重置订阅。
+    remaining = snapshot.reset_at - snapshot.sample_at
+    rearmed = (
+        remaining >= config.rearm_remaining
+        and snapshot.reset_after_seconds >= int(config.rearm_remaining.total_seconds())
+        and remaining <= timedelta(days=7) + CYCLE_BOUNDARY_TOLERANCE
+    )
+    usage_reset = (
+        state.used_percent is not None
+        and snapshot.used_percent is not None
+        and state.used_percent - snapshot.used_percent >= 1.0
+    )
+    # 上游可能提前重置。边界明显推进、用量下降且恢复长周期，三项共同确认。
+    # 6 小时参数只防止边界异常后退，不限制真实重置的向前变化。
+    if rearmed and usage_reset and shift > CYCLE_BOUNDARY_TOLERANCE:
+        return Decision("reset", "账号用量下降且重置边界推进，确认新周期")
     if snapshot.sample_at + CYCLE_BOUNDARY_TOLERANCE < state.reset_at:
         return Decision("observe", "账号尚未到达预计重置时间，等待实际进入新周期")
-
-    remaining = snapshot.reset_at - snapshot.sample_at
-    if remaining < config.rearm_remaining or snapshot.reset_after_seconds < int(
-        config.rearm_remaining.total_seconds()
-    ):
+    if not rearmed:
         return Decision("not_rearmed", "新快照尚未回到完整 7d 周期")
     if shift < config.min_cycle_shift:
         return Decision("suspicious", "7d 重置时间变化不足一个新周期，拒绝自动重置")
     return Decision("reset", "检测到 7d 倒计时进入新周期")
+
 
 
 class ApiError(RuntimeError):
@@ -580,7 +590,7 @@ class AdminApi:
         return payload
 
     def reset_subscription(
-        self, subscription_id: int, config: Config
+        self, subscription_id: int, config: Config, cycle_reset_at: str
     ) -> dict[str, Any]:
         payload = self.request(
             "POST",
@@ -589,6 +599,7 @@ class AdminApi:
                 "daily": config.reset_daily,
                 "weekly": config.reset_weekly,
                 "monthly": config.reset_monthly,
+                "cycle_reset_at": cycle_reset_at,
             },
         )
         if not isinstance(payload, dict):
@@ -964,16 +975,6 @@ class StateStore:
         snapshot: Snapshot,
         targets: list[dict[str, Any]],
     ) -> int | None:
-        for target in targets:
-            for enabled, name in (
-                (config.reset_weekly, "weekly_window_start"),
-                (config.reset_monthly, "monthly_window_start"),
-            ):
-                if enabled and target.get(name) in (None, ""):
-                    raise RuntimeError(
-                        f"订阅 {target['subscription_id']} 缺少 {name}，"
-                        "拒绝执行无法幂等恢复的重置"
-                    )
         event_key = hashlib.sha256(
             f"{account_id}\0{snapshot.reset_at.isoformat()}".encode()
         ).hexdigest()
@@ -1230,22 +1231,23 @@ def reset_config_from_event(base: Config, event: sqlite3.Row) -> Config:
     )
 
 
-def selected_windows_changed(
-    subscription: dict[str, Any], target: sqlite3.Row, config: Config
+def cycle_windows_applied(
+    subscription: dict[str, Any], config: Config, cycle_reset_at: str
 ) -> bool:
+    next_reset = parse_timestamp(cycle_reset_at)
+    anchor = next_reset - timedelta(days=7)
     selected = []
     for enabled, name in (
         (config.reset_weekly, "weekly_window_start"),
         (config.reset_monthly, "monthly_window_start"),
     ):
         if enabled:
-            before = target[f"previous_{name}"]
-            after = subscription.get(name)
-            selected.append(
-                before not in (None, "")
-                and after not in (None, "")
-                and str(before) != str(after)
-            )
+            value = subscription.get(name)
+            if value in (None, ""):
+                selected.append(False)
+            else:
+                start = parse_timestamp(str(value))
+                selected.append(start == anchor or start >= next_reset)
     return bool(selected) and all(selected)
 
 
@@ -1349,7 +1351,7 @@ def process_pending_events(
                         "订阅不再有效或已移出目标分组",
                     )
                     continue
-                if selected_windows_changed(subscription, target, config):
+                if cycle_windows_applied(subscription, config, event["cycle_reset_at"]):
                     store.mark_target(event_id, subscription_id, "done")
                     print(
                         f"subscription_reset=recovered event_id={event_id} "
@@ -1357,11 +1359,11 @@ def process_pending_events(
                     )
                     continue
                 store.mark_target(event_id, subscription_id, "processing")
-                updated = api.reset_subscription(subscription_id, config)
-                if not selected_windows_changed(updated, target, config):
+                updated = api.reset_subscription(subscription_id, config, event["cycle_reset_at"])
+                if not cycle_windows_applied(updated, config, event["cycle_reset_at"]):
                     updated = api.subscription(subscription_id)
-                if not selected_windows_changed(updated, target, config):
-                    raise RuntimeError("Admin API 返回成功但配额窗口没有变化")
+                if not cycle_windows_applied(updated, config, event["cycle_reset_at"]):
+                    raise RuntimeError("Admin API 未将配额窗口对齐账号周期；需要支持 cycle_reset_at 的宿主版本")
                 store.mark_target(event_id, subscription_id, "done")
                 print(
                     f"subscription_reset=done event_id={event_id} "
@@ -1465,10 +1467,10 @@ def main() -> int:
             if decision.action == "stale":
                 continue
             if decision.action == "not_rearmed":
-                store.write_observation(account_id, snapshot, update_cycle=True)
+                store.write_observation(account_id, snapshot, update_cycle=False)
                 continue
             if decision.action == "observe":
-                store.write_observation(account_id, snapshot, update_cycle=True)
+                store.write_observation(account_id, snapshot, update_cycle=False)
                 continue
             if decision.action == "suspicious":
                 store.write_observation(account_id, snapshot, update_cycle=False)

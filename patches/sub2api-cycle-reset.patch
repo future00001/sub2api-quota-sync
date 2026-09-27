@@ -1,0 +1,202 @@
+--- a/backend/internal/handler/admin/subscription_handler.go
++++ b/backend/internal/handler/admin/subscription_handler.go
+@@ -237,9 +237,10 @@
+ 
+ // ResetSubscriptionQuotaRequest represents the reset quota request
+ type ResetSubscriptionQuotaRequest struct {
+-	Daily   bool `json:"daily"`
+-	Weekly  bool `json:"weekly"`
+-	Monthly bool `json:"monthly"`
++	CycleResetAt *time.Time `json:"cycle_reset_at"`
++	Daily        bool       `json:"daily"`
++	Weekly       bool       `json:"weekly"`
++	Monthly      bool       `json:"monthly"`
+ }
+ 
+ // ResetQuota resets daily, weekly, and/or monthly usage for a subscription.
+@@ -259,7 +260,12 @@
+ 		response.BadRequest(c, "At least one of 'daily', 'weekly', or 'monthly' must be true")
+ 		return
+ 	}
+-	sub, err := h.subscriptionService.AdminResetQuota(c.Request.Context(), subscriptionID, req.Daily, req.Weekly, req.Monthly)
++	var sub *service.UserSubscription
++	if req.CycleResetAt != nil {
++		sub, err = h.subscriptionService.AdminResetQuotaForCycle(c.Request.Context(), subscriptionID, req.Daily, req.Weekly, req.Monthly, *req.CycleResetAt)
++	} else {
++		sub, err = h.subscriptionService.AdminResetQuota(c.Request.Context(), subscriptionID, req.Daily, req.Weekly, req.Monthly)
++	}
+ 	if err != nil {
+ 		response.ErrorFrom(c, err)
+ 		return
+--- /dev/null
++++ b/backend/internal/service/subscription_cycle_sync.go
+@@ -0,0 +1,45 @@
++package service
++
++import (
++	"context"
++	"time"
++
++	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
++	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
++)
++
++// AdminResetQuotaForCycle atomically clears quota and anchors periodic windows to
++// the upstream seven-day cycle. The row lock makes retries safe after a lost reply.
++func (s *SubscriptionService) AdminResetQuotaForCycle(ctx context.Context, id int64, daily, weekly, monthly bool, nextReset time.Time) (*UserSubscription, error) {
++	now := s.now()
++	if (!weekly && !monthly) || !nextReset.After(now) || nextReset.After(now.Add(7*24*time.Hour+5*time.Minute)) {
++		return nil, infraerrors.BadRequest("INVALID_CYCLE_RESET_AT", "cycle_reset_at must be a future seven-day boundary and select a periodic window")
++	}
++	anchor := nextReset.Add(-7 * 24 * time.Hour)
++	var result *UserSubscription
++	err := s.withSubscriptionUpdateTx(ctx, func(txCtx context.Context) error {
++		sub, err := s.userSubRepo.GetByIDForUpdate(txCtx, id)
++		if err != nil {
++			return err
++		}
++		if sub.Status != SubscriptionStatusActive || !sub.ExpiresAt.After(now) {
++			return ErrSubscriptionExpired
++		}
++		alreadyApplied := (!weekly || (sub.WeeklyWindowStart != nil && (sub.WeeklyWindowStart.Equal(anchor) || !sub.WeeklyWindowStart.Before(nextReset)))) &&
++			(!monthly || (sub.MonthlyWindowStart != nil && (sub.MonthlyWindowStart.Equal(anchor) || !sub.MonthlyWindowStart.Before(nextReset))))
++		if !alreadyApplied {
++			if err := s.userSubRepo.ResetUsageWindows(txCtx, id, daily, weekly, monthly, timezone.StartOfDay(now), anchor); err != nil {
++				return err
++			}
++		}
++		result, err = s.userSubRepo.GetByID(txCtx, id)
++		return err
++	})
++	if err != nil {
++		return nil, err
++	}
++	if err := s.invalidateSubscriptionCaches(result.UserID, result.GroupID); err != nil {
++		return nil, err
++	}
++	return result, nil
++}
+--- /dev/null
++++ b/backend/internal/service/subscription_cycle_sync_test.go
+@@ -0,0 +1,121 @@
++package service
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"entgo.io/ent/dialect"
++	entsql "entgo.io/ent/dialect/sql"
++	"github.com/DATA-DOG/go-sqlmock"
++	dbent "github.com/Wei-Shaw/sub2api/ent"
++	"github.com/stretchr/testify/require"
++)
++
++type cycleQuotaRepoStub struct {
++	UserSubscriptionRepository
++	sub               *UserSubscription
++	resetWeeklyCalled bool
++}
++
++func (r *cycleQuotaRepoStub) GetByID(_ context.Context, id int64) (*UserSubscription, error) {
++	copy := *r.sub
++	return &copy, nil
++}
++
++func (r *cycleQuotaRepoStub) ResetUsageWindows(_ context.Context, _ int64, daily, weekly, monthly bool, dailyStart, start time.Time) error {
++	r.resetWeeklyCalled = weekly
++	if daily {
++		r.sub.DailyUsageUSD = 0
++		r.sub.DailyWindowStart = &dailyStart
++	}
++	if weekly {
++		r.sub.WeeklyUsageUSD = 0
++		r.sub.WeeklyWindowStart = &start
++	}
++	if monthly {
++		r.sub.MonthlyUsageUSD = 0
++		r.sub.MonthlyWindowStart = &start
++	}
++	return nil
++}
++
++func (r *cycleQuotaRepoStub) GetByIDForUpdate(ctx context.Context, id int64) (*UserSubscription, error) {
++	return r.GetByID(ctx, id)
++}
++
++func TestCycleSyncAlignsQuotaAndRetriesWithoutClearingNewUsage(t *testing.T) {
++	now := time.Date(2026, 9, 27, 2, 0, 0, 0, time.UTC)
++	next := now.Add(6*24*time.Hour + 15*time.Hour)
++	stub := &cycleQuotaRepoStub{sub: &UserSubscription{ID: 1, Status: SubscriptionStatusActive, ExpiresAt: now.Add(30 * 24 * time.Hour), WeeklyUsageUSD: 123}}
++	svc := NewSubscriptionService(nil, stub, nil, nil, nil)
++	svc.now = func() time.Time { return now }
++	sub, err := svc.AdminResetQuotaForCycle(context.Background(), 1, false, true, false, next)
++	require.NoError(t, err)
++	require.Equal(t, 0.0, sub.WeeklyUsageUSD)
++	require.Equal(t, next, *sub.WeeklyResetTime())
++	stub.sub.WeeklyUsageUSD = 17
++	stub.resetWeeklyCalled = false
++	sub, err = svc.AdminResetQuotaForCycle(context.Background(), 1, false, true, false, next)
++	require.NoError(t, err)
++	require.False(t, stub.resetWeeklyCalled)
++	require.Equal(t, 17.0, sub.WeeklyUsageUSD)
++}
++
++func TestCycleSyncRejectsInvalidBoundaryWithoutMutation(t *testing.T) {
++	now := time.Now()
++	for _, next := range []time.Time{now.Add(-time.Second), now.Add(8 * 24 * time.Hour)} {
++		stub := &cycleQuotaRepoStub{sub: &UserSubscription{ID: 1, Status: SubscriptionStatusActive, ExpiresAt: now.Add(30 * 24 * time.Hour), WeeklyUsageUSD: 123}}
++		svc := NewSubscriptionService(nil, stub, nil, nil, nil)
++		svc.now = func() time.Time { return now }
++		_, err := svc.AdminResetQuotaForCycle(context.Background(), 1, false, true, false, next)
++		require.Error(t, err)
++		require.False(t, stub.resetWeeklyCalled)
++	}
++}
++
++func TestCycleSyncAlignsExistingManualWindow(t *testing.T) {
++	now := time.Now()
++	start := now.Add(-time.Hour)
++	stub := &cycleQuotaRepoStub{sub: &UserSubscription{ID: 1, Status: SubscriptionStatusActive, ExpiresAt: now.Add(30 * 24 * time.Hour), WeeklyWindowStart: &start, WeeklyUsageUSD: 17}}
++	svc := NewSubscriptionService(nil, stub, nil, nil, nil)
++	svc.now = func() time.Time { return now }
++	_, err := svc.AdminResetQuotaForCycle(context.Background(), 1, false, true, false, now.Add(5*24*time.Hour))
++	require.NoError(t, err)
++	require.True(t, stub.resetWeeklyCalled)
++	require.Equal(t, 0.0, stub.sub.WeeklyUsageUSD)
++	require.Equal(t, now.Add(5*24*time.Hour), *stub.sub.WeeklyResetTime())
++}
++
++func TestCycleSyncRollsBackFailureAndCommitsRetryOnce(t *testing.T) {
++	sqlDB, mock, err := sqlmock.New()
++	require.NoError(t, err)
++	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, sqlDB)))
++	t.Cleanup(func() { _ = client.Close() })
++	now := time.Now()
++	repo := &transactionalBulkSubscriptionRepo{
++		committed: UserSubscription{ID: 1, Status: SubscriptionStatusActive, ExpiresAt: now.Add(30 * 24 * time.Hour), WeeklyUsageUSD: 42},
++		pending:   make(map[*dbent.Tx]*UserSubscription), reads: make(map[*dbent.Tx]int), postReadFailure: true,
++	}
++	svc := NewSubscriptionService(nil, repo, nil, client, nil)
++	svc.now = func() time.Time { return now }
++	next := now.Add(6 * 24 * time.Hour)
++	mock.ExpectBegin()
++	mock.ExpectRollback()
++	_, err = svc.AdminResetQuotaForCycle(context.Background(), 1, false, true, false, next)
++	require.Error(t, err)
++	require.Equal(t, 42.0, repo.committed.WeeklyUsageUSD)
++	repo.postReadFailure = false
++	mock.ExpectBegin()
++	mock.ExpectCommit()
++	_, err = svc.AdminResetQuotaForCycle(context.Background(), 1, false, true, false, next)
++	require.NoError(t, err)
++	require.Equal(t, next, *repo.committed.WeeklyResetTime())
++	repo.committed.WeeklyUsageUSD = 8
++	mock.ExpectBegin()
++	mock.ExpectCommit()
++	_, err = svc.AdminResetQuotaForCycle(context.Background(), 1, false, true, false, next)
++	require.NoError(t, err)
++	require.Equal(t, 8.0, repo.committed.WeeklyUsageUSD)
++	require.NoError(t, mock.ExpectationsWereMet())
++}

@@ -147,6 +147,26 @@ class DecisionTests(unittest.TestCase):
         )
         self.assertEqual("suspicious", decide(state, self.snapshot, config()).action)
 
+    def test_early_reset_with_usage_drop_and_seven_hour_shift(self):
+        state = State(self.reset_at, self.sample_at - timedelta(minutes=1), 60.0)
+        snap = Snapshot(self.reset_at + timedelta(hours=7), self.sample_at, 0.0, 579600)
+        self.assertEqual("reset", decide(state, snap, config()).action)
+
+    def test_forward_estimate_without_usage_drop_does_not_reset(self):
+        state = State(self.reset_at, self.sample_at - timedelta(minutes=1), 60.0)
+        snap = Snapshot(self.reset_at + timedelta(hours=7), self.sample_at, 60.0, 579600)
+        self.assertEqual("observe", decide(state, snap, config()).action)
+
+    def test_usage_drop_with_small_time_jitter_does_not_reset(self):
+        state = State(self.reset_at, self.sample_at - timedelta(minutes=1), 60.0)
+        snap = Snapshot(self.reset_at + timedelta(minutes=2), self.sample_at, 0.0, 554520)
+        self.assertEqual("observe", decide(state, snap, config()).action)
+
+    def test_short_window_with_usage_drop_does_not_reset(self):
+        state = State(self.sample_at + timedelta(hours=1), self.sample_at - timedelta(minutes=1), 60.0)
+        snap = Snapshot(self.sample_at + timedelta(hours=8), self.sample_at, 0.0, 28800)
+        self.assertEqual("observe", decide(state, snap, config()).action)
+
 
 class ConfigTests(unittest.TestCase):
     def test_enabled_requires_group(self):
@@ -232,10 +252,10 @@ class FakeAdminApi:
             raise AssertionError("unexpected subscription")
         return dict(self.current)
 
-    def reset_subscription(self, subscription_id, reset_config):
+    def reset_subscription(self, subscription_id, reset_config, cycle_reset_at):
         self.reset_calls += 1
         if reset_config.reset_weekly:
-            self.current["weekly_window_start"] = "2026-08-30T00:00:00+00:00"
+            self.current["weekly_window_start"] = (datetime.fromisoformat(cycle_reset_at) - timedelta(days=7)).isoformat()
         if self.fail_after_reset:
             self.fail_after_reset = False
             raise RuntimeError("simulated ambiguous response")
@@ -325,11 +345,23 @@ class StateStoreTests(unittest.TestCase):
             ).fetchone()[0],
         )
 
-    def test_missing_window_marker_fails_closed(self):
-        target = dict(self.target)
-        target["weekly_window_start"] = None
-        with self.assertRaisesRegex(RuntimeError, "无法幂等恢复"):
-            self.store.create_event(config(dry_run=False), 1, self.snapshot, [target])
+    def test_unactivated_subscription_can_be_reset_and_retried(self):
+        target = dict(self.target, weekly_window_start=None)
+        self.store.create_event(config(dry_run=False), 1, self.snapshot, [target])
+        api = FakeAdminApi(dict(self.subscription, weekly_window_start=None), fail_after_reset=True)
+        process_pending_events(api, self.store, config(dry_run=False))
+        process_pending_events(api, self.store, config(dry_run=False))
+        self.assertEqual(1, api.reset_calls)
+        self.assertEqual([], self.store.pending_events())
+
+    def test_observation_cannot_swallow_later_cycle_transition(self):
+        old = Snapshot(self.snapshot.reset_at - timedelta(days=7), self.snapshot.sample_at - timedelta(hours=2), 98, 7200)
+        self.store.write_observation(1, old, update_cycle=True)
+        future = Snapshot(self.snapshot.reset_at, old.sample_at + timedelta(minutes=1), 98, 604800)
+        self.assertEqual("observe", decide(self.store.load_state(1), future, config()).action)
+        self.store.write_observation(1, future, update_cycle=False)
+        self.assertEqual(old.reset_at, self.store.load_state(1).reset_at)
+        self.assertEqual("reset", decide(self.store.load_state(1), self.snapshot, config()).action)
 
 
 class BalanceModeConfigTests(unittest.TestCase):
