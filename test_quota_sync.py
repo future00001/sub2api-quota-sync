@@ -70,7 +70,27 @@ class DecisionTests(unittest.TestCase):
             self.sample_at - timedelta(minutes=1),
             98.0,
         )
-        self.assertEqual("reset", decide(state, self.snapshot, config()).action)
+        snapshot = Snapshot(self.reset_at, self.sample_at, 2.0, 554400)
+        self.assertEqual("reset", decide(state, snapshot, config()).action)
+
+    def test_normal_cycle_requires_seven_day_usage_refresh(self):
+        sample = self.reset_at + timedelta(minutes=1)
+        for before, after in ((98, 98), (98, 99), (40, 39), (98, 30), (None, 0), (98, None), (0, 0), (2, 2)):
+            with self.subTest(before=before, after=after):
+                state = State(self.reset_at, sample - timedelta(minutes=2), before)
+                snap = Snapshot(self.reset_at + timedelta(days=7), sample, after, 604740)
+                decision = decide(state, snap, config())
+                self.assertEqual("observe", decision.action)
+                self.assertIn("7d", decision.reason)
+
+    def test_normal_cycle_with_refreshed_usage_clears_once(self):
+        sample = self.reset_at + timedelta(minutes=1)
+        state = State(self.reset_at, sample - timedelta(minutes=2), 98)
+        snap = Snapshot(self.reset_at + timedelta(days=7), sample, 1, 604740)
+        self.assertEqual("reset", decide(state, snap, config()).action)
+        state = State(snap.reset_at, snap.sample_at, snap.used_percent)
+        later = Snapshot(snap.reset_at, sample + timedelta(minutes=1), 2, 604680)
+        self.assertEqual("observe", decide(state, later, config()).action)
 
     def test_future_reset_shift_before_boundary_only_updates_observation(self):
         state = State(

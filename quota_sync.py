@@ -434,6 +434,7 @@ def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
     usage_reset = (
         state.used_percent is not None
         and snapshot.used_percent is not None
+        and snapshot.used_percent <= 5.0
         and state.used_percent - snapshot.used_percent >= 1.0
     )
     # 仅百分比下降不能证明重置：上游会修正百分比和预计时间。
@@ -446,7 +447,6 @@ def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
     )
     if (
         rearmed and usage_reset and fresh_cycle
-        and snapshot.used_percent <= 5.0
         and shift > max(config.jitter_tolerance, CYCLE_BOUNDARY_TOLERANCE)
     ):
         return Decision("reset", "新周期起点落在采样区间、用量回到低位且边界显著推进")
@@ -456,7 +456,9 @@ def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
         return Decision("not_rearmed", "新快照尚未回到完整 7d 周期")
     if shift < config.min_cycle_shift:
         return Decision("suspicious", "7d 重置时间变化不足一个新周期，拒绝自动重置")
-    return Decision("reset", "检测到 7d 倒计时进入新周期")
+    if not usage_reset:
+        return Decision("observe", "未确认账号 7d 已用额度刷新，不清零订阅")
+    return Decision("reset", "账号 7d 已用额度已刷新且倒计时进入新周期")
 
 
 
