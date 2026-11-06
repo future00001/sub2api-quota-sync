@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -114,11 +115,16 @@ def main():
         atomic_write(SITE,changed)
         subprocess.run(["nginx","-t"],check=True)
         subprocess.run(["systemctl","reload","nginx"],check=True)
-        status,headers,body=get("https://ai.677001.xyz:8081/admin/plugins",
-                               {"Accept":"text/html","If-None-Match":'"old-cached-entry"'})
-        assert status==200
-        html=body.decode()
-        assert all(url in html for url in assets.values())
+        # reload 只发送信号；等待新 worker 接管，避免把短暂的旧响应误判为失败。
+        for attempt in range(20):
+            status,headers,body=get("https://ai.677001.xyz:8081/admin/plugins",
+                                   {"Accept":"text/html","If-None-Match":'"old-cached-entry"'})
+            html=body.decode()
+            if status==200 and all(url in html for url in assets.values()):
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("新版 HTML 入口未生效，自动回滚")
         assert "window.__APP_CONFIG__" in html, "后端设置注入丢失"
         nonce=re.search(r"'nonce-([^']+)'",headers.get("Content-Security-Policy","")).group(1)
         assert f'nonce="{nonce}"' in html, "CSP nonce 不匹配"
