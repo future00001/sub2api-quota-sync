@@ -17,6 +17,7 @@ root_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 install -d -m 0755 /opt/sub2api-quota-sync
 install -m 0755 "$root_dir/quota_sync.py" /opt/sub2api-quota-sync/quota_sync.py
+install -m 0644 "$root_dir/reset_card_schedule.py" /opt/sub2api-quota-sync/reset_card_schedule.py
 install -m 0755 "$root_dir/transfer_server.py" /opt/sub2api-quota-sync/transfer_server.py
 install -m 0644 "$root_dir/README.md" /opt/sub2api-quota-sync/README.md
 install -m 0644 "$root_dir/sub2api-quota-sync.service" /etc/systemd/system/sub2api-quota-sync.service

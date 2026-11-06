@@ -1,10 +1,13 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Quota Sync UI Harness</title>
-<style>html,body,iframe{width:100%;height:100%;margin:0;border:0}</style>
+<title>配额同步插件测试</title>
+<style>body{margin:0;font-family:sans-serif}iframe{display:block;width:100%;height:1100px;border:0}button{padding:10px}</style>
+<button id="narrow">切换窄屏</button><button id="done">模拟执行完成</button>
 <iframe id="plugin" src="index.html#bridge_token=test-token"></iframe>
 <script>
 const frame=document.getElementById('plugin');
-const config={enabled:false,dry_run:true,account_ids:[1],target_groups:['4'],reset_daily:false,reset_weekly:true,reset_monthly:false,min_cycle_shift_seconds:86400,rearm_remaining_seconds:432000,jitter_tolerance_seconds:21600,catalog:{accounts:[{id:1,label:'demo@example.com',name:'Demo',status:'active',schedulable:true}],groups:[{id:3,name:'测试订阅组 A'},{id:4,name:'测试订阅组 B'}]}};
-addEventListener('message',event=>{const d=event.data;if(event.source!==frame.contentWindow||!d||d.source!=='sub2api-plugin-ui'||!d.request_id)return;let response={source:'sub2api-plugin-host',bridge_token:'test-token',request_id:d.request_id,ok:true};if(d.type==='config.load')response.config=config;if(d.type==='config.save')response.config={...d.config,catalog:config.catalog};if(d.type==='config.test')response.result={success:true,message:'后台执行器已读取配置：业务开关关闭'};frame.contentWindow.postMessage(response,'*');});
+let config={enabled:true,dry_run:false,account_ids:[1],target_groups:['4'],reset_daily:false,reset_weekly:true,reset_monthly:false,min_cycle_shift_seconds:86400,rearm_remaining_seconds:432000,jitter_tolerance_seconds:21600,catalog:{accounts:[{id:1,label:'测试账号',name:'测试账号',status:'active',schedulable:true,reset_credit_expires_at:'2026-11-06T23:22:20.333043Z'}],groups:[{id:4,name:'测试订阅组'}]}};
+document.getElementById('narrow').onclick=()=>{frame.style.width=frame.style.width==='360px'?'100%':'360px';};
+document.getElementById('done').onclick=()=>{if(config.reset_card_schedule){config.reset_card_schedule.enabled=false;config.reset_card_schedule.result='已自动使用一次重置卡，单次开关已关闭';}};
+addEventListener('message',event=>{const d=event.data;if(event.source!==frame.contentWindow||!d||d.source!=='sub2api-plugin-ui'||!d.request_id)return;let response={source:'sub2api-plugin-host',bridge_token:'test-token',request_id:d.request_id,ok:true};if(d.type==='config.load')response.config=config;if(d.type==='config.save'){config={...d.config,catalog:config.catalog};response.config=config;}if(d.type==='config.test')response.result={success:true,message:'后台执行器已读取配置'};frame.contentWindow.postMessage(response,'*');});
 </script>

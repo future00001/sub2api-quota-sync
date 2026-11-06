@@ -52,15 +52,15 @@ def main() -> None:
         "schema_version": 1,
         "id": PLUGIN_ID,
         "name": "7d 订阅配额同步",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "description": (
             "配置账号 7d 周期与订阅配额同步；误启用宿主绑定时提供兼容 HTTP 流式透传。"
         ),
         "author": "hzyhz",
         "requires": {
             "sub2api": ">=0.1.183-0",
-            "recommended_sub2api_version": "0.1.183",
-            "tested_sub2api_versions": ["0.1.183", "0.1.183-custom-r2"],
+            "recommended_sub2api_version": "0.2.18",
+            "tested_sub2api_versions": ["0.1.183", "0.1.183-custom-r2", "0.2.18-custom-r1"],
             "plugin_protocol": 1,
             "transport_api": 1,
             "ui_bridge": 1,

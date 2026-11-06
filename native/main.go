@@ -23,26 +23,27 @@ import (
 
 const (
 	pluginID      = "com.hzyhz.sub2api-quota-sync"
-	pluginVersion = "0.5.0"
+	pluginVersion = "0.6.0"
 	capabilityID  = "openai.oauth.outbound_transport.v1"
 	configName    = "quota-sync-config.json"
 	catalogName   = "quota-sync-catalog.json"
 )
 
 type Config struct {
-	Enabled                bool           `json:"enabled"`
-	DryRun                 bool           `json:"dry_run"`
-	Mode                   string         `json:"mode"`
-	AccountIDs             []int64        `json:"account_ids"`
-	LegacyAccountID        int64          `json:"account_id,omitempty"`
-	TargetGroups           []string       `json:"target_groups"`
-	Catalog                *optionCatalog `json:"catalog,omitempty"`
-	ResetDaily             bool           `json:"reset_daily"`
-	ResetWeekly            bool           `json:"reset_weekly"`
-	ResetMonthly           bool           `json:"reset_monthly"`
-	MinCycleShiftSeconds   int            `json:"min_cycle_shift_seconds"`
-	RearmRemainingSeconds  int            `json:"rearm_remaining_seconds"`
-	JitterToleranceSeconds int            `json:"jitter_tolerance_seconds"`
+	ResetCardSchedule      *resetCardSchedule `json:"reset_card_schedule,omitempty"`
+	Enabled                bool               `json:"enabled"`
+	DryRun                 bool               `json:"dry_run"`
+	Mode                   string             `json:"mode"`
+	AccountIDs             []int64            `json:"account_ids"`
+	LegacyAccountID        int64              `json:"account_id,omitempty"`
+	TargetGroups           []string           `json:"target_groups"`
+	Catalog                *optionCatalog     `json:"catalog,omitempty"`
+	ResetDaily             bool               `json:"reset_daily"`
+	ResetWeekly            bool               `json:"reset_weekly"`
+	ResetMonthly           bool               `json:"reset_monthly"`
+	MinCycleShiftSeconds   int                `json:"min_cycle_shift_seconds"`
+	RearmRemainingSeconds  int                `json:"rearm_remaining_seconds"`
+	JitterToleranceSeconds int                `json:"jitter_tolerance_seconds"`
 }
 
 type executorStatus struct {
@@ -59,11 +60,12 @@ type executorStatus struct {
 }
 
 type catalogAccount struct {
-	ID          int64  `json:"id"`
-	Label       string `json:"label"`
-	Name        string `json:"name"`
-	Status      string `json:"status"`
-	Schedulable bool   `json:"schedulable"`
+	ID                   int64  `json:"id"`
+	Label                string `json:"label"`
+	Name                 string `json:"name"`
+	Status               string `json:"status"`
+	Schedulable          bool   `json:"schedulable"`
+	ResetCreditExpiresAt string `json:"reset_credit_expires_at,omitempty"`
 }
 
 type catalogGroup struct {
@@ -173,6 +175,9 @@ func normalizeConfig(raw []byte) ([]byte, Config, error) {
 	if cfg.JitterToleranceSeconds >= cfg.MinCycleShiftSeconds {
 		return nil, Config{}, errors.New("时间抖动容差必须小于新周期最小跳变")
 	}
+	if err := validateResetCardSchedule(cfg.ResetCardSchedule); err != nil {
+		return nil, Config{}, err
+	}
 	normalized, err := json.Marshal(cfg)
 	if err != nil {
 		return nil, Config{}, err
@@ -226,6 +231,9 @@ func (s *server) readCatalog() optionCatalog {
 func (s *server) normalizeForHost(raw []byte) ([]byte, Config, error) {
 	_, cfg, err := normalizeConfig(raw)
 	if err != nil {
+		return nil, Config{}, err
+	}
+	if err := s.validateNewResetCardSchedule(cfg.ResetCardSchedule); err != nil {
 		return nil, Config{}, err
 	}
 	catalog := s.readCatalog()

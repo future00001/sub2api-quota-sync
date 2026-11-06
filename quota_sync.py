@@ -202,6 +202,7 @@ class Config:
             "account_id",
             "account_ids",
             "catalog",
+            "reset_card_schedule",
             "target_groups",
             "reset_daily",
             "reset_weekly",
@@ -395,6 +396,9 @@ class Snapshot:
     sample_at: datetime
     used_percent: float | None
     reset_after_seconds: int
+    # 宿主 7d 窗口费用（美元，/admin/accounts/:id/usage 的
+    # seven_day.window_stats.cost），精细到分，滑动窗口时旧请求滑出会下降。
+    window_cost: float | None = None
 
 
 @dataclass(frozen=True)
@@ -402,6 +406,11 @@ class State:
     reset_at: datetime
     sample_at: datetime
     used_percent: float | None
+    # 最近一次确认周期（创建重置事件或建立基线）时的账号用量百分比。
+    # 观察快照不更新它，用于判断窗口滑动时账号用量是否回升。
+    confirmed_used_percent: float | None = None
+    # 上一轮检查时宿主 7d 窗口费用（美元），观察快照会更新它。
+    window_cost: float | None = None
 
 
 @dataclass(frozen=True)
@@ -450,6 +459,23 @@ def decide(state: State | None, snapshot: Snapshot, config: Config) -> Decision:
         and shift > max(config.jitter_tolerance, CYCLE_BOUNDARY_TOLERANCE)
     ):
         return Decision("reset", "新周期起点落在采样区间、用量回到低位且边界显著推进")
+    # 已确认边界仍在未来时，上游可能把整个 7d 窗口向后滑动（本次周期起点
+    # 随用量修正而推迟）。跟随条件：宿主 7d 窗口费用（美元，精确到分）比
+    # 上一轮检查下降——窗口真实滑动会让旧请求滑出窗口、费用下降，上游单纯
+    # 修正时间数据不会影响宿主自己的账单；边界推进超过抖动容差；剩余时间
+    # 不超过 7 天。时间门槛不能省：reset_at 每分钟都有秒级抖动，零阈值会
+    # 把订阅用量反复清零；2026-10-22 观测到确认后 1 小时内即出现 +74 秒
+    # 的新高。费用上升说明仍在累积用量，无法区分滑动与修正，不跟随。
+    if (
+        snapshot.sample_at + CYCLE_BOUNDARY_TOLERANCE < state.reset_at
+        and snapshot.window_cost is not None
+        and state.window_cost is not None
+        and snapshot.window_cost < state.window_cost
+        and snapshot.reset_at - snapshot.sample_at
+        <= timedelta(days=7) + CYCLE_BOUNDARY_TOLERANCE
+        and shift > max(config.jitter_tolerance, CYCLE_BOUNDARY_TOLERANCE)
+    ):
+        return Decision("reset", "账号 7d 重置时间整体后移超过抖动容差且窗口费用下降，跟随对齐订阅窗口")
     if snapshot.sample_at + CYCLE_BOUNDARY_TOLERANCE < state.reset_at:
         return Decision("observe", "账号尚未到达预计重置时间，等待实际进入新周期")
     if not rearmed:
@@ -585,6 +611,12 @@ class AdminApi:
             raise RuntimeError(f"账号 {account_id} 响应格式无效")
         return payload
 
+    def account_usage(self, account_id: int) -> dict[str, Any]:
+        payload = self.request("GET", f"/admin/accounts/{account_id}/usage")
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"账号 {account_id} 用量响应格式无效")
+        return payload
+
     def subscriptions(self, group_ids: tuple[int, ...]) -> list[dict[str, Any]]:
         targets: dict[int, dict[str, Any]] = {}
         for group_id in group_ids:
@@ -690,6 +722,19 @@ def resolve_group_ids(api: AdminApi, selectors: tuple[str, ...]) -> tuple[int, .
     return tuple(dict.fromkeys(resolved))
 
 
+def earliest_credit_expiry(extra: dict) -> str:
+    snapshot = extra.get("codex_reset_credit_snapshot") or {}
+    dates = []
+    for credit in snapshot.get("credits", []) if isinstance(snapshot, dict) else []:
+        try:
+            date = parse_timestamp(credit["expires_at"])
+            if date > datetime.now(UTC):
+                dates.append(date)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return min(dates).isoformat() if dates else ""
+
+
 def load_catalog(api: AdminApi) -> dict[str, object]:
     accounts = []
     for account in api.accounts():
@@ -705,6 +750,7 @@ def load_catalog(api: AdminApi) -> dict[str, object]:
                 "name": account.get("name") or "",
                 "status": account.get("status") or "",
                 "schedulable": bool(account.get("schedulable")),
+                "reset_credit_expires_at": earliest_credit_expiry(extra),
             }
         )
     groups = [
@@ -747,7 +793,28 @@ def load_snapshot(api: AdminApi, account_id: int) -> Snapshot:
         raise RuntimeError(f"账号 {account_id} 的 codex 7d 用量百分比无效")
     if snapshot.reset_after_seconds < 0:
         raise RuntimeError(f"账号 {account_id} 的 codex 7d 剩余时间无效")
-    return snapshot
+    return replace(snapshot, window_cost=load_window_cost(api, account_id))
+
+
+def load_window_cost(api: AdminApi, account_id: int) -> float | None:
+    # 7d 窗口费用取自宿主自己的账单（/usage 的 seven_day.window_stats.cost），
+    # 失败时不影响主流程，只是本轮漂移跟随因缺少费用信号而跳过。
+    try:
+        usage = api.account_usage(account_id)
+    except (ApiError, RuntimeError) as exc:
+        print(f"window_cost=unavailable account_id={account_id} error={exc}", file=sys.stderr)
+        return None
+    seven_day = usage.get("seven_day")
+    if not isinstance(seven_day, dict):
+        return None
+    stats = seven_day.get("window_stats")
+    if not isinstance(stats, dict) or stats.get("cost") in (None, ""):
+        return None
+    cost = float(stats["cost"])
+    if not math.isfinite(cost) or cost < 0:
+        print(f"window_cost=invalid account_id={account_id} cost={cost}", file=sys.stderr)
+        return None
+    return cost
 
 
 def subscription_is_eligible(
@@ -927,6 +994,21 @@ class StateStore:
             );
             """
         )
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(account_state)")
+        }
+        if "confirmed_used_percent" not in columns:
+            self.db.execute(
+                "ALTER TABLE account_state ADD COLUMN confirmed_used_percent REAL"
+            )
+            # 存量行的确认用量以当前观测值回填。
+            self.db.execute(
+                "UPDATE account_state SET confirmed_used_percent=used_percent"
+            )
+        if "window_cost" not in columns:
+            self.db.execute(
+                "ALTER TABLE account_state ADD COLUMN window_cost REAL"
+            )
         self.db.commit()
 
     def close(self) -> None:
@@ -943,6 +1025,12 @@ class StateStore:
             sample_at=parse_timestamp(row["sample_updated_at"]),
             used_percent=float(row["used_percent"])
             if row["used_percent"] is not None
+            else None,
+            confirmed_used_percent=float(row["confirmed_used_percent"])
+            if row["confirmed_used_percent"] is not None
+            else None,
+            window_cost=float(row["window_cost"])
+            if row["window_cost"] is not None
             else None,
         )
 
@@ -961,12 +1049,13 @@ class StateStore:
             """
             INSERT INTO account_state(
                 account_id, cycle_reset_at, sample_updated_at, used_percent,
-                initialized_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                confirmed_used_percent, window_cost, initialized_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_id) DO UPDATE SET
                 cycle_reset_at=excluded.cycle_reset_at,
                 sample_updated_at=excluded.sample_updated_at,
                 used_percent=excluded.used_percent,
+                window_cost=COALESCE(excluded.window_cost, account_state.window_cost),
                 updated_at=excluded.updated_at
             """,
             (
@@ -974,6 +1063,8 @@ class StateStore:
                 cycle_reset_at.isoformat(),
                 snapshot.sample_at.isoformat(),
                 snapshot.used_percent,
+                snapshot.used_percent,
+                snapshot.window_cost,
                 now,
                 now,
             ),
@@ -1107,12 +1198,14 @@ class StateStore:
             """
             INSERT INTO account_state(
                 account_id, cycle_reset_at, sample_updated_at, used_percent,
-                initialized_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                confirmed_used_percent, window_cost, initialized_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_id) DO UPDATE SET
                 cycle_reset_at=excluded.cycle_reset_at,
                 sample_updated_at=excluded.sample_updated_at,
                 used_percent=excluded.used_percent,
+                confirmed_used_percent=excluded.confirmed_used_percent,
+                window_cost=COALESCE(excluded.window_cost, account_state.window_cost),
                 updated_at=excluded.updated_at
             """,
             (
@@ -1120,6 +1213,8 @@ class StateStore:
                 snapshot.reset_at.isoformat(),
                 snapshot.sample_at.isoformat(),
                 snapshot.used_percent,
+                snapshot.used_percent,
+                snapshot.window_cost,
                 now,
                 now,
             ),
@@ -1421,6 +1516,8 @@ def main() -> int:
             print(f"status=disabled config_source={config_source}")
             return 0
         api = AdminApi(config)
+        from reset_card_schedule import process_schedule
+        process_schedule(api, config_source, config.state_path.parent)
         catalog = load_catalog(api)
         write_plugin_json(config_source, "quota-sync-catalog.json", catalog)
         if not config.enabled:

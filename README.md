@@ -191,3 +191,26 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/plugin .
 
 验证：`python3 -m unittest -v test_quota_sync.py test_transfer_server.py`。
 宿主补丁验证：`go test ./internal/service ./internal/handler/admin -run 'Test(CycleSync|BulkSubscriptionAction|Weekly)' -count=1`。
+
+## 单次定时使用重置卡（v0.6.0）
+
+在插件设置底部开启“一次性预约”，选择账号和**北京时间（UTC+8）**，保存即可。
+例如卡片在 2026-11-07 07:22 到期，可预约 2026-11-07 02:00。日期带年份，
+后台约每分钟检查一次，浏览器关闭后仍会执行。新功能默认关闭，不会自动创建预约。
+
+- 独立于订阅自动同步开关，但遵守演练模式：演练时不消费卡片，并在到点后关闭本次预约。
+- 卡片信息来自宿主账号缓存；如果没有到期信息，先在账号页面查询重置卡，再刷新插件选项。
+- 调用宿主现有手动用卡接口一次；调用前会确认预约时的到期卡仍可用。
+- 先将任务持久化到 SQLite，再关闭开关，然后发出一次用卡请求。执行成功后显示结果。
+- 响应超时、进程中断或结果未知时不会重试，避免误用第二张卡；请人工核对后另建预约。
+- 错过时间超过 15 分钟、卡片失效或开启了宿主按阈值自动用卡时，关闭预约而不消费。
+- 防重状态存储在 STATE_PATH 同目录的 reset-card-schedule.sqlite3，不得删除来重跑任务。
+- 正常再次预约会生成新任务 ID；普通保存不改变 ID。账号按阈值自动用卡与本功能不要同时开启。
+
+验证：python3 -m unittest -v test_quota_sync.py test_transfer_server.py test_reset_card_schedule.py；
+原生插件：go test ./... 与 go vet ./...；界面回归使用 native/ui/test-harness.html，
+它只模拟保存和执行结果，不会连接生产 API。
+
+本次保留了服务器 2026-10-23 已生效的窗口费用下降/周期漂移跟随逻辑；不回退到旧源码实现。
+兼容性提示不全局关闭：插件宿主状态恢复为 disabled（业务同步仍由自己的开关控制），
+并将实际验证过的 0.2.18-custom-r1 写入清单。

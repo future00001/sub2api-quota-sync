@@ -14,6 +14,7 @@
     .option-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:4px 0}.option{display:flex;align-items:flex-start;gap:9px;padding:10px;border:1px solid var(--border);border-radius:8px;font-weight:500}.option input{margin-top:2px}.option-text{min-width:0}.option-title{display:block;overflow-wrap:anywhere}.option-meta{display:block;margin-top:3px;color:var(--muted);font-size:12px;font-weight:400}.empty{padding:10px 0;color:var(--muted);font-size:13px}
     .actions{display:flex;gap:10px;margin-top:18px}button{border:0;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.primary{background:var(--accent);color:white}.secondary{background:#e2e8f0;color:#0f172a}
     button:disabled{opacity:.55;cursor:wait}.status{min-height:24px;margin-top:12px;font-size:14px}.ok{color:#16a34a}.error{color:#dc2626}
+    .schedule{margin-top:24px;padding-top:20px;border-top:1px solid var(--border)}.actions{flex-wrap:wrap}input,select{min-width:0;width:100%}.check input{width:auto}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
     h2{margin:0 0 14px;font-size:20px}@media(max-width:620px){.grid,.option-list{grid-template-columns:1fr}.wide{grid-column:auto}}
   </style>
 </head>
@@ -31,8 +32,20 @@
     <div class="field"><label for="rearm">新周期最小剩余时间（小时）</label><input id="rearm" type="number" min="24" max="168" step="1"><span class="hint">默认 120 小时，确认倒计时已重新充满。</span></div>
     <div class="field"><label for="jitter">时间抖动容差（小时）</label><input id="jitter" type="number" min="0" max="24" step="1"><span class="hint">默认 6 小时。</span></div>
   </div>
+  <section class="schedule" aria-labelledby="scheduleTitle">
+    <h2 id="scheduleTitle">单次定时使用重置卡</h2>
+    <label class="check"><input id="scheduleEnabled" type="checkbox">开启一次性预约</label>
+    <p class="hint">独立于“启用自动同步”；沿用上方演练模式。到点调用一次手动用卡接口，执行后自动关闭。超时或结果未知不会重试；错过时间超过 15 分钟会取消。</p>
+    <div class="grid">
+      <div class="field"><label for="scheduleAccount">用卡账号</label><select id="scheduleAccount"></select></div>
+      <div class="field"><label for="scheduleAt">执行时间（北京时间 UTC+8）</label><input id="scheduleAt" type="datetime-local" step="60" aria-describedby="scheduleHint"></div>
+    </div>
+    <p class="hint" id="scheduleHint">例如：卡片 11/07 07:22 到期，可预约 11/07 02:00。后台约每分钟检查一次，无需保持页面打开。</p>
+    <p class="hint" id="scheduleExpiry"></p>
+    <p id="scheduleResult" role="status" aria-live="polite"></p>
+  </section>
   <div class="actions"><button class="primary" id="save">保存设置</button><button class="secondary" id="refresh">刷新选项</button><button class="secondary" id="test">测试已保存配置</button></div>
-  <div class="status" id="status"></div>
+  <div class="status" id="status" role="status" aria-live="polite"></div>
 </main>
 <script>
 (() => {
@@ -43,13 +56,66 @@
   function notify(text, ok=true){ status.textContent=text; status.className='status '+(ok?'ok':'error'); resize(); }
   function request(type, payload={}){ return new Promise((resolve,reject)=>{ const request_id=`qsync-${Date.now()}-${++seq}`; const timer=setTimeout(()=>{pending.delete(request_id);reject(new Error('操作超时'));},15000); pending.set(request_id,{resolve,reject,timer}); parent.postMessage({source:'sub2api-plugin-ui',bridge_token:token,type,request_id,...payload},'*'); }); }
   addEventListener('message', event => { const d=event.data; if(event.source!==parent||!d||d.source!=='sub2api-plugin-host'||d.bridge_token!==token||!pending.has(d.request_id))return; const p=pending.get(d.request_id);pending.delete(d.request_id);clearTimeout(p.timer);d.ok?p.resolve(d):p.reject(new Error(d.error||d.message||'操作失败')); });
+  let dirty=false;
+  let scheduleTouched=false;
+  function beijingInput(value){
+    if(!value)return '';
+    const date=new Date(value);
+    return Number.isFinite(date.getTime())?new Date(date.getTime()+8*3600000).toISOString().slice(0,16):'';
+  }
+  function beijingTime(value){return beijingInput(value).replace('T',' ');}
+  function scheduleExpiry(){
+    const account=(catalog.accounts||[]).find(a=>Number(a.id)===Number($('scheduleAccount').value));
+    const expiry=account?.reset_credit_expires_at||'';
+    $('scheduleExpiry').textContent=expiry?'最近到期重置卡：'+beijingTime(expiry)+'（北京时间）':'暂无重置卡到期信息，请先在账号页查询重置卡，再刷新选项。';
+    return expiry;
+  }
+  function fillSchedule(){
+    const s=currentConfig.reset_card_schedule;
+    const select=$('scheduleAccount');
+    select.replaceChildren();
+    for(const account of catalog.accounts||[]){
+      if(account.status!=='active')continue;
+      const option=document.createElement('option');option.value=String(account.id);
+      option.textContent=account.label||account.name||('账号 '+account.id);select.append(option);
+    }
+    if(s?.account_id)select.value=String(s.account_id);
+    $('scheduleEnabled').checked=!!s?.enabled;
+    $('scheduleAt').value=beijingInput(s?.run_at);
+    $('scheduleAt').min=beijingInput(new Date(Date.now()+60000).toISOString());
+    $('scheduleResult').textContent=s?.result||(s?.enabled?'已预约：'+beijingTime(s.run_at)+'（北京时间），执行一次后自动关闭。':'尚未开启预约');
+    scheduleTouched=false;scheduleExpiry();syncScheduleInputs();
+  }
+  function syncScheduleInputs(){
+    const enabled=$('scheduleEnabled').checked;
+    $('scheduleAccount').disabled=!enabled;$('scheduleAt').disabled=!enabled;
+  }
+  function collectSchedule(){
+    const old=currentConfig?.reset_card_schedule;
+    if(!$('scheduleEnabled').checked)return old?{...old,enabled:false}:undefined;
+    const accountID=Number($('scheduleAccount').value);
+    const input=$('scheduleAt').value;
+    const date=new Date(input+':00+08:00');
+    if(!accountID||!input||!Number.isFinite(date.getTime()))throw new Error('请选择用卡账号和执行时间（北京时间）');
+    const runAt=date.toISOString();
+    const unchanged=old?.enabled&&!scheduleTouched&&old.account_id===accountID&&beijingInput(old.run_at)===input;
+    if(unchanged)return old;
+    if(date.getTime()<=Date.now())throw new Error('执行时间必须在未来（北京时间）');
+    const expiry=scheduleExpiry();
+    if(!expiry||date.getTime()>=new Date(expiry).getTime())throw new Error('执行时间必须早于最近重置卡到期时间；没有卡片信息时请先查询并刷新选项');
+    return {id:crypto.randomUUID(),enabled:true,account_id:accountID,run_at:runAt,credit_expires_at:expiry};
+  }
+  for(const id of ['scheduleEnabled','scheduleAccount','scheduleAt']){
+    $(id).addEventListener('change',()=>{scheduleTouched=true;dirty=true;scheduleExpiry();syncScheduleInputs();});
+  }
+  document.querySelector('main').addEventListener('input',()=>{dirty=true;});
   function defaults(){return{enabled:false,dry_run:true,mode:'subscription',account_ids:[1],target_groups:[],reset_daily:false,reset_weekly:true,reset_monthly:false,min_cycle_shift_seconds:86400,rearm_remaining_seconds:432000,jitter_tolerance_seconds:21600};}
   function selectedAccountIDs(c){return(c.account_ids||[c.account_id]).filter(Number.isFinite).map(Number);}
   function selectedGroupIDs(c){const selected=new Set();for(const value of c.target_groups||[]){const match=catalog.groups.find(g=>String(g.id)===String(value)||g.name===String(value));if(match)selected.add(Number(match.id));}return selected;}
   function option(container,inputType,name,value,title,meta,checked,disabled=false){const label=document.createElement('label');label.className='option';const input=document.createElement('input');input.type=inputType;input.name=name;input.value=String(value);input.checked=checked;input.disabled=disabled;const text=document.createElement('span');text.className='option-text';const heading=document.createElement('span');heading.className='option-title';heading.textContent=title;const detail=document.createElement('span');detail.className='option-meta';detail.textContent=meta;text.append(heading,detail);label.append(input,text);container.append(label);}
   function renderOptions(){if(!currentConfig)return;const accountBox=$('accountOptions');const groupBox=$('groupOptions');accountBox.replaceChildren();groupBox.replaceChildren();const selectedAccounts=new Set(selectedAccountIDs(currentConfig));for(const account of catalog.accounts||[]){option(accountBox,'checkbox','account',account.id,account.label||account.name,`ID ${account.id} · ${account.status}${account.schedulable?' · 可调度':''}`,selectedAccounts.has(Number(account.id)),account.status!=='active');}if(!accountBox.children.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='暂无可选 OpenAI OAuth 账号';accountBox.append(empty);}const selectedGroups=selectedGroupIDs(currentConfig);for(const group of catalog.groups||[]){option(groupBox,'checkbox','targetGroup',group.id,group.name,`ID ${group.id}`,selectedGroups.has(Number(group.id)));}if(!groupBox.children.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='暂无有效订阅分组';groupBox.append(empty);}resize();}
-  function fill(raw){const migrated={...(raw||{})};if(!migrated.account_ids&&migrated.account_id)migrated.account_ids=[migrated.account_id];currentConfig={...defaults(),...migrated};if(currentConfig.catalog)catalog=currentConfig.catalog;$('enabled').checked=!!currentConfig.enabled;$('dryRun').checked=!!currentConfig.dry_run;$('mode').value=currentConfig.mode==='balance'?'balance':'subscription';syncBalanceHint();$('daily').checked=!!currentConfig.reset_daily;$('weekly').checked=!!currentConfig.reset_weekly;$('monthly').checked=!!currentConfig.reset_monthly;$('shift').value=currentConfig.min_cycle_shift_seconds/3600;$('rearm').value=currentConfig.rearm_remaining_seconds/3600;$('jitter').value=currentConfig.jitter_tolerance_seconds/3600;renderOptions();}
-  function collect(){return{enabled:$('enabled').checked,dry_run:$('dryRun').checked,mode:$('mode').value,account_ids:[...document.querySelectorAll('input[name="account"]:checked')].map(i=>Number(i.value)),target_groups:[...document.querySelectorAll('input[name="targetGroup"]:checked')].map(i=>i.value),reset_daily:$('daily').checked,reset_weekly:$('weekly').checked,reset_monthly:$('monthly').checked,min_cycle_shift_seconds:Number($('shift').value)*3600,rearm_remaining_seconds:Number($('rearm').value)*3600,jitter_tolerance_seconds:Number($('jitter').value)*3600};}
+  function fill(raw){const migrated={...(raw||{})};if(!migrated.account_ids&&migrated.account_id)migrated.account_ids=[migrated.account_id];currentConfig={...defaults(),...migrated};if(currentConfig.catalog)catalog=currentConfig.catalog;$('enabled').checked=!!currentConfig.enabled;$('dryRun').checked=!!currentConfig.dry_run;$('mode').value=currentConfig.mode==='balance'?'balance':'subscription';syncBalanceHint();$('daily').checked=!!currentConfig.reset_daily;$('weekly').checked=!!currentConfig.reset_weekly;$('monthly').checked=!!currentConfig.reset_monthly;$('shift').value=currentConfig.min_cycle_shift_seconds/3600;$('rearm').value=currentConfig.rearm_remaining_seconds/3600;$('jitter').value=currentConfig.jitter_tolerance_seconds/3600;renderOptions();fillSchedule();dirty=false;}
+  function collect(){return{reset_card_schedule:collectSchedule(),enabled:$('enabled').checked,dry_run:$('dryRun').checked,mode:$('mode').value,account_ids:[...document.querySelectorAll('input[name="account"]:checked')].map(i=>Number(i.value)),target_groups:[...document.querySelectorAll('input[name="targetGroup"]:checked')].map(i=>i.value),reset_daily:$('daily').checked,reset_weekly:$('weekly').checked,reset_monthly:$('monthly').checked,min_cycle_shift_seconds:Number($('shift').value)*3600,rearm_remaining_seconds:Number($('rearm').value)*3600,jitter_tolerance_seconds:Number($('jitter').value)*3600};}
   function syncBalanceHint(){const balance=$('mode').value==='balance';$('balanceHint').style.display=balance?'':'none';$('groupField').style.display=balance?'none':'';$('windowField').style.display=balance?'none':'';resize();}
   $('mode').onchange=syncBalanceHint;
   function busy(value){$('save').disabled=value;$('refresh').disabled=value;$('test').disabled=value;}
@@ -59,6 +125,7 @@
   $('test').onclick=async()=>{busy(true);try{const r=await request('config.test');notify(r.result?.message||'测试通过',r.result?.success!==false);}catch(e){notify(e.message,false);}finally{busy(false);}};
   parent.postMessage({source:'sub2api-plugin-ui',bridge_token:token,type:'sub2api.plugin.ready',request_id:`ready-${Date.now()}`},'*');
   request('config.load').then(r=>fill(r.config)).catch(e=>{fill({});notify(e.message,false);});
+  setInterval(async()=>{if(dirty||$('save').disabled)return;try{const r=await request('config.load');if(!dirty)fill(r.config);}catch{}},15000);
   addEventListener('load',resize); new ResizeObserver(resize).observe(document.body);
 })();
 </script>
