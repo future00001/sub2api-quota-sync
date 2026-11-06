@@ -1,0 +1,195 @@
+--- a/frontend/src/views/admin/PluginsView.vue
++++ b/frontend/src/views/admin/PluginsView.vue
+@@ -105,9 +105,9 @@
+                 >
+                 <span
+                   class="rounded px-2 py-0.5 text-xs font-medium"
+-                  :class="stateClass(plugin.state)"
++                  :class="stateClass(backgroundStatus(plugin)?.state || plugin.state)"
+                 >
+-                  {{ t(`admin.plugins.${plugin.state}`) }}
++                  {{ backgroundStatus(plugin)?.label || t(`admin.plugins.${plugin.state}`) }}
+                 </span>
+               </div>
+               <p class="mt-1 text-xs text-gray-500">
+@@ -185,9 +185,9 @@
+                   "
+                 >
+                   {{
+-                    plugin.runtime_healthy
++                    backgroundStatus(plugin)?.mode || (plugin.runtime_healthy
+                       ? t("admin.plugins.healthy")
+-                      : t("admin.plugins.unhealthy")
++                      : t("admin.plugins.unhealthy"))
+                   }}
+                 </span>
+                 <span
+@@ -197,6 +197,7 @@
+                   {{ t(`admin.plugins.${plugin.signature_status}`) }}
+                 </span>
+               </div>
++              <p v-if="backgroundStatus(plugin)" class="mt-3 text-xs text-gray-500">{{ backgroundStatus(plugin)?.detail }}</p>
+               <p
+                 v-if="plugin.last_error"
+                 class="mt-3 break-words text-xs text-red-600 dark:text-red-400"
+@@ -211,7 +212,7 @@
+               </p>
+             </div>
+ 
+-            <div class="md:col-span-2">
++            <div v-if="!isQuotaSyncPlugin(plugin)" class="md:col-span-2">
+               <label
+                 class="flex items-center justify-between gap-4 text-xs font-medium text-gray-600 dark:text-gray-300"
+               >
+@@ -258,7 +259,7 @@
+               {{ t("admin.plugins.disable") }}
+             </button>
+             <button
+-              v-else
++              v-else-if="!isQuotaSyncPlugin(plugin)"
+               type="button"
+               class="btn btn-primary btn-sm"
+               :disabled="
+@@ -352,6 +353,8 @@
+   useStepUp,
+ } from "@/composables/useStepUp";
+ 
++import { isQuotaSyncPlugin, quotaSyncStatus } from "@/utils/quota-sync-status.mjs";
++
+ interface PluginBridgeMessage {
+   source?: string;
+   bridge_token?: string;
+@@ -363,7 +366,7 @@
+   message?: unknown;
+ }
+ 
+-const { t } = useI18n();
++const { t, locale } = useI18n();
+ const appStore = useAppStore();
+ const pluginStepUp = useStepUp();
+ const plugins = ref<PluginInstallation[]>([]);
+@@ -381,6 +384,19 @@
+ const pluginFrameLoaded = ref(false);
+ const pendingBridgeRequests = new Map<string, number>();
+ let uiSessionVersion = 0;
++const backgroundConfigs = ref<Record<number, Record<string, unknown> | null>>({});
++let backgroundTimer: ReturnType<typeof setInterval> | undefined;
++function backgroundStatus(plugin: PluginInstallation) {
++  return quotaSyncStatus(plugin, backgroundConfigs.value[plugin.id], locale?.value || "zh");
++}
++async function refreshBackgroundConfig(plugin: PluginInstallation): Promise<void> {
++  if (!isQuotaSyncPlugin(plugin)) return;
++  try { backgroundConfigs.value[plugin.id] = await adminAPI.plugins.getConfig(plugin.id); }
++  catch { backgroundConfigs.value[plugin.id] = null; }
++}
++async function refreshBackgroundConfigs(): Promise<void> {
++  await Promise.all(plugins.value.filter(isQuotaSyncPlugin).map(refreshBackgroundConfig));
++}
+ 
+ function errorMessage(error: unknown): string {
+   if (typeof error === "object" && error !== null && "message" in error) {
+@@ -411,6 +427,7 @@
+     for (const plugin of plugins.value) {
+       rolloutValues.value[plugin.id] = currentRollout(plugin);
+     }
++    await refreshBackgroundConfigs();
+   } catch (error: unknown) {
+     appStore.showError(errorMessage(error));
+   } finally {
+@@ -648,6 +665,7 @@
+             message.config as Record<string, unknown>,
+           ),
+         );
++        backgroundConfigs.value[configPlugin.value!.id] = config;
+         postBridgeResult(message, { ok: true, config });
+         appStore.showSuccess(t("common.saved"));
+         break;
+@@ -725,9 +743,11 @@
+ onMounted(() => {
+   window.addEventListener("message", handleBridgeMessage);
+   void loadPlugins();
++  backgroundTimer = setInterval(() => { void refreshBackgroundConfigs(); }, 15000);
+ });
+ 
+ onBeforeUnmount(() => {
++  if (backgroundTimer) clearInterval(backgroundTimer);
+   window.removeEventListener("message", handleBridgeMessage);
+   closeConfiguration();
+ });
+--- a/frontend/src/views/admin/__tests__/PluginsView.spec.ts
++++ b/frontend/src/views/admin/__tests__/PluginsView.spec.ts
+@@ -225,3 +225,37 @@
+     expect(uploadPlugin).toHaveBeenCalledTimes(1)
+   })
+ })
++
++describe('配额同步插件业务状态', () => {
++  beforeEach(() => {
++    vi.clearAllMocks()
++    listPlugins.mockResolvedValue([{ ...plugin, plugin_key: 'com.hzyhz.sub2api-quota-sync' }])
++  })
++  it.each([
++    [{ enabled: true, dry_run: false }, '同步已启用'],
++    [{ enabled: false }, '业务已关闭'],
++    [{ enabled: true, dry_run: true }, '演练模式'],
++    [{ enabled: false, reset_card_schedule: { enabled: true } }, '已预约用卡'],
++  ])('按真实业务配置展示状态 %j', async (config, label) => {
++    const { adminAPI } = await import('@/api/admin')
++    vi.mocked(adminAPI.plugins.getConfig).mockResolvedValue(config)
++    const wrapper = mountView()
++    await flushPromises()
++    expect(wrapper.text()).toContain(label)
++    expect(wrapper.text()).toContain('后台任务模式')
++    expect(wrapper.text()).not.toContain('admin.plugins.disabled')
++    expect(wrapper.text()).not.toContain('admin.plugins.unhealthy')
++    expect(wrapper.find('input[type=range]').exists()).toBe(false)
++    expect(wrapper.findAll('button').some(b => b.text() === 'admin.plugins.enable')).toBe(false)
++    expect(enablePlugin).not.toHaveBeenCalled()
++    expect(stepUpRun).not.toHaveBeenCalled()
++  })
++  it('读取失败显示待确认而非假成功', async () => {
++    const { adminAPI } = await import('@/api/admin')
++    vi.mocked(adminAPI.plugins.getConfig).mockRejectedValue(new Error('offline'))
++    const wrapper = mountView()
++    await flushPromises()
++    expect(wrapper.text()).toContain('状态待确认')
++    expect(wrapper.text()).not.toContain('同步已启用')
++  })
++})
+--- /dev/null
++++ b/frontend/src/utils/quota-sync-status.mjs
+@@ -0,0 +1,28 @@
++export const QUOTA_SYNC_KEY = "com.hzyhz.sub2api-quota-sync";
++
++export function isQuotaSyncPlugin(plugin) {
++  return plugin.plugin_key === QUOTA_SYNC_KEY;
++}
++
++// 只展示配置状态，不把“开关开启”冒充后台执行器健康。
++export function quotaSyncStatus(plugin, config, locale = "zh") {
++  if (!isQuotaSyncPlugin(plugin) || plugin.state !== "disabled" ||
++      !plugin.compatibility?.compatible || plugin.last_error) return null;
++  const zh = String(locale).startsWith("zh");
++  const words = zh ? {
++    pending: "状态待确认", off: "业务已关闭", sync: "同步已启用",
++    dry: "演练模式", scheduled: "已预约用卡", mode: "后台任务模式",
++    detail: "后台独立执行，无需启用 HTTP 透传。此处显示业务开关；执行状态请点击“测试”检查。"
++  } : {
++    pending: "Status unavailable", off: "Business tasks off", sync: "Sync enabled",
++    dry: "Dry-run mode", scheduled: "Reset scheduled", mode: "Background tasks",
++    detail: "Runs independently; HTTP passthrough is not required. This shows configuration; use Test to check the executor."
++  };
++  if (!config || typeof config.enabled !== "boolean") {
++    return {label:words.pending,state:"starting",mode:words.mode,detail:words.detail};
++  }
++  const active = config.enabled || config.reset_card_schedule?.enabled === true;
++  if (!active) return {label:words.off,state:"disabled",mode:words.mode,detail:words.detail};
++  if (config.dry_run) return {label:words.dry,state:"starting",mode:words.mode,detail:words.detail};
++  return {label:config.enabled?words.sync:words.scheduled,state:"enabled",mode:words.mode,detail:words.detail};
++}
+--- /dev/null
++++ b/frontend/src/utils/quota-sync-status.d.mts
+@@ -0,0 +1,3 @@
++type Plugin = {plugin_key: string; state: string; compatibility?: {compatible?: boolean}; last_error?: string};
++export function isQuotaSyncPlugin(plugin: Plugin): boolean;
++export function quotaSyncStatus(plugin: Plugin, config: Record<string, unknown> | null | undefined, locale?: string): {label: string; state: 'enabled' | 'disabled' | 'starting'; mode: string; detail: string} | null;

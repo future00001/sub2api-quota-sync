@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { quotaSyncStatus } from "./quota-sync-status.mjs";
+const plugin={plugin_key:"com.hzyhz.sub2api-quota-sync",state:"disabled",compatibility:{compatible:true},last_error:""};
+test("同步开启显示业务开关而非宿主停用",()=>assert.equal(quotaSyncStatus(plugin,{enabled:true,dry_run:false}).label,"同步已启用"));
+test("预约不依赖同步开关",()=>assert.equal(quotaSyncStatus(plugin,{enabled:false,reset_card_schedule:{enabled:true}}).label,"已预约用卡"));
+test("已关闭不能伪装正常",()=>assert.equal(quotaSyncStatus(plugin,{enabled:false}).label,"业务已关闭"));
+test("演练模式明显区分",()=>assert.equal(quotaSyncStatus(plugin,{enabled:true,dry_run:true}).label,"演练模式"));
+test("查询失败不显示绿色成功",()=>assert.equal(quotaSyncStatus(plugin,null).state,"starting"));
+test("异常兼容性必须保留",()=>assert.equal(quotaSyncStatus({...plugin,state:"incompatible"}, {enabled:true}),null));
+test("宿主报错必须保留",()=>assert.equal(quotaSyncStatus({...plugin,last_error:"broken"}, {enabled:true}),null));
+test("其他插件的停用提示不改变",()=>assert.equal(quotaSyncStatus({...plugin,plugin_key:"other"}, {enabled:true}),null));
+test("真正开启的透传仍展示宿主状态",()=>assert.equal(quotaSyncStatus({...plugin,state:"enabled"}, {enabled:true}),null));
+test("英语显示相同业务语义",()=>assert.equal(quotaSyncStatus(plugin,{enabled:true},"en").label,"Sync enabled"));
