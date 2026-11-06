@@ -214,3 +214,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/plugin .
 本次保留了服务器 2026-10-23 已生效的窗口费用下降/周期漂移跟随逻辑；不回退到旧源码实现。
 兼容性提示不全局关闭：插件宿主状态恢复为 disabled（业务同步仍由自己的开关控制），
 并将实际验证过的 0.2.18-custom-r1 写入清单。
+
+### 发布者密钥轮换
+
+打包器支持 --key-id 指定独立发布者 ID（默认保留旧 ID）。新增发布者时先备份宿主配置，
+追加新的公钥而非覆盖旧条目，重启宿主后上传重新签名的插件；不要关闭签名校验。
+本部署 v0.6.0 使用 hzyhz-sub2api-quota-sync-v2，公钥为
+6W618fATkOF9QDiOpCzbQJ79pMMJn1ZLqklYQvgeAQ0=。私钥不进入版本控制或插件包。

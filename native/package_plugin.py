@@ -42,7 +42,10 @@ def main() -> None:
     parser.add_argument("--ui", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--key", type=Path, required=True)
+    parser.add_argument("--key-id", default=KEY_ID, help="宿主信任配置中的发布者 ID")
     args = parser.parse_args()
+    if not args.key_id.strip():
+        parser.error("--key-id 不能为空")
 
     files = {
         "runtimes/linux-amd64/plugin": sha256(args.binary),
@@ -82,7 +85,7 @@ def main() -> None:
     key = load_or_create_key(args.key)
     signature = {
         "algorithm": "ed25519",
-        "key_id": KEY_ID,
+        "key_id": args.key_id,
         "signature": base64.b64encode(key.sign(manifest_raw)).decode("ascii"),
     }
     public_raw = key.public_key().public_bytes(
@@ -104,7 +107,7 @@ def main() -> None:
             {
                 "output": str(args.output),
                 "sha256": sha256(args.output),
-                "key_id": KEY_ID,
+                "key_id": args.key_id,
                 "public_key_base64": base64.b64encode(public_raw).decode("ascii"),
             },
             ensure_ascii=False,
